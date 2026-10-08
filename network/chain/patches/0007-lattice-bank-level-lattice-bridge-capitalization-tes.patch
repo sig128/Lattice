@@ -1,0 +1,451 @@
+From a26070cca3fca2d72c53c9c7a6a654eca5c50c7d Mon Sep 17 00:00:00 2001
+From: Lattice Bridge <bridge@lattice.local>
+Date: Thu, 8 Oct 2026 23:45:54 +0200
+Subject: [PATCH 7/7] lattice: bank-level lattice-bridge capitalization tests
+
+End-to-end tests on a real Bank with the bridge feature and accounts in
+genesis: governance binds the Lattice genesis hash, a guardian-attested
+deposit mints exactly once and raises capitalization by the minted
+amount, a replay is rejected without moving supply, a burn lowers
+capitalization by exactly the burned amount and writes a receipt, a
+mint inside a failing transaction changes nothing, and after freeze
+capitalization equals the recomputed account sum.
+
+Not compiled on the development host (disk); run on the build server:
+cargo test -p solana-runtime --lib lattice_bridge
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+---
+ Cargo.lock                               |   2 +
+ runtime/Cargo.toml                       |   2 +
+ runtime/src/bank.rs                      |   1 +
+ runtime/src/bank/lattice_bridge_tests.rs | 367 +++++++++++++++++++++++
+ 4 files changed, 372 insertions(+)
+ create mode 100644 runtime/src/bank/lattice_bridge_tests.rs
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 14d471c57..2108aca49 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -10330,6 +10330,7 @@ dependencies = [
+  "crossbeam-queue",
+  "crossbeam-utils",
+  "dashmap",
++ "ed25519-dalek 2.2.0",
+  "imbl",
+  "itertools 0.14.0",
+  "libc",
+@@ -10386,6 +10387,7 @@ dependencies = [
+  "solana-instruction",
+  "solana-instruction-error",
+  "solana-keypair",
++ "solana-lattice-bridge-program",
+  "solana-lattice-hash",
+  "solana-leader-schedule",
+  "solana-loader-v3-interface",
+diff --git a/runtime/Cargo.toml b/runtime/Cargo.toml
+index c24a3e5cd..c44cf321e 100644
+--- a/runtime/Cargo.toml
++++ b/runtime/Cargo.toml
+@@ -200,11 +200,13 @@ agave-logger = { path = "../logger", features = ["agave-unstable-api"] }
+ agave-transaction-view = { workspace = true }
+ bitvec = { workspace = true }
+ criterion = { workspace = true }
++ed25519-dalek = { workspace = true }
+ libsecp256k1 = { workspace = true }
+ proptest = { workspace = true }
+ solana-accounts-db = { path = "../accounts-db", features = ["agave-unstable-api", "dev-context-only-utils"] }
+ solana-builtins = { path = "../builtins", features = ["agave-unstable-api", "dev-context-only-utils"] }
+ solana-instruction-error = { workspace = true }
++solana-lattice-bridge-program = { workspace = true }
+ solana-runtime = { path = ".", features = ["agave-unstable-api", "dev-context-only-utils"] }
+ solana-runtime-transaction = { path = "../runtime-transaction", features = ["agave-unstable-api", "dev-context-only-utils"] }
+ solana-sdk-ids = { workspace = true }
+diff --git a/runtime/src/bank.rs b/runtime/src/bank.rs
+index 44c6d0db6..c18ea6d1b 100644
+--- a/runtime/src/bank.rs
++++ b/runtime/src/bank.rs
+@@ -234,6 +234,7 @@ pub mod builtins;
+ mod check_transactions;
+ pub mod entry_bytes_budget;
+ mod fee_distribution;
++mod lattice_bridge_tests;
+ mod metrics;
+ pub(crate) mod partitioned_epoch_rewards;
+ mod recent_blockhashes_account;
+diff --git a/runtime/src/bank/lattice_bridge_tests.rs b/runtime/src/bank/lattice_bridge_tests.rs
+new file mode 100644
+index 000000000..05d1b13e5
+--- /dev/null
++++ b/runtime/src/bank/lattice_bridge_tests.rs
+@@ -0,0 +1,367 @@
++#![cfg(test)]
++//! End-to-end lattice-bridge tests on a real `Bank`: supply changes recorded
++//! by the builtin must move capitalization by exactly the minted/burned
++//! amount, and capitalization must still equal the sum of all accounts.
++
++use {
++    super::Bank,
++    crate::genesis_utils::{GenesisConfigInfo, activate_feature, create_genesis_config},
++    ed25519_dalek::Signer as _,
++    solana_account::{Account, AccountSharedData, ReadableAccount},
++    solana_instruction::{Instruction, error::InstructionError},
++    solana_keypair::Keypair,
++    solana_lattice_bridge_program::{
++        error::BridgeError,
++        genesis::{GenesisBridgeConfig, build_genesis_accounts},
++        instruction::builders,
++        state::{
++            self, AttestationHeader, BridgeState, BurnReceipt, GuardianSet, MintRecord,
++            NETWORK_TESTNET,
++        },
++        wire::{self, GovernanceAction, GuardianKey, Header, Transfer},
++    },
++    solana_pubkey::Pubkey,
++    solana_signer::Signer,
++    solana_system_interface::instruction as system_instruction,
++    solana_transaction::Transaction,
++    solana_transaction_error::TransactionError,
++};
++
++const DECIMALS: u8 = 6;
++const SCALE: u64 = 1_000;
++const SOLANA_GENESIS: [u8; 32] = [0x11; 32];
++const SOURCE_PROGRAM: [u8; 32] = [0x33; 32];
++const SOURCE_MINT: [u8; 32] = [0x44; 32];
++
++struct Fixture {
++    bank: std::sync::Arc<Bank>,
++    _forks: std::sync::Arc<std::sync::RwLock<crate::bank_forks::BankForks>>,
++    payer: Keypair,
++    guardians: Vec<ed25519_dalek::SigningKey>,
++    deployment_id: [u8; 32],
++    lattice_genesis_hash: [u8; 32],
++}
++
++impl Fixture {
++    fn new() -> Self {
++        let GenesisConfigInfo {
++            mut genesis_config,
++            mint_keypair,
++            ..
++        } = create_genesis_config(1_000_000 * 1_000_000_000);
++        activate_feature(
++            &mut genesis_config,
++            agave_feature_set::enable_lattice_bridge_program::id(),
++        );
++        let guardians: Vec<_> = (1..=3u8)
++            .map(|seed| ed25519_dalek::SigningKey::from_bytes(&[seed; 32]))
++            .collect();
++        let deployment_id = wire::deployment_id(b"bank-test");
++        let config = GenesisBridgeConfig {
++            network: NETWORK_TESTNET,
++            deployment_id,
++            solana_genesis_hash: SOLANA_GENESIS,
++            source_program_id: SOURCE_PROGRAM,
++            source_mint: SOURCE_MINT,
++            source_decimals: DECIMALS,
++            guardian_set: GuardianSet {
++                scheme: wire::SCHEME_ED25519,
++                threshold: 2,
++                bump: 0,
++                epoch: 1,
++                created_slot: 0,
++                deployment_id,
++                keys: guardians
++                    .iter()
++                    .map(|key| GuardianKey {
++                        ed25519: Some(key.verifying_key().to_bytes()),
++                        mldsa65: None,
++                    })
++                    .collect(),
++            },
++            pauser: [0; 32],
++            max_mint_per_epoch: u64::MAX,
++            bootstrap_deposits: vec![],
++        };
++        let rent = genesis_config.rent.clone();
++        let (accounts, _) =
++            build_genesis_accounts(&config, &solana_lattice_bridge_program::id(), 0, 0, |len| {
++                rent.minimum_balance(len)
++            })
++            .unwrap();
++        for account in accounts {
++            genesis_config.add_account(
++                account.address,
++                AccountSharedData::from(Account {
++                    lamports: account.lamports,
++                    data: account.data,
++                    owner: solana_lattice_bridge_program::id(),
++                    executable: false,
++                    rent_epoch: 0,
++                }),
++            );
++        }
++        let lattice_genesis_hash = genesis_config.hash().to_bytes();
++        let (bank, forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
++        assert_eq!(
++            bank.capitalization(),
++            bank.calculate_capitalization_for_tests()
++        );
++        let fixture = Self {
++            bank,
++            _forks: forks,
++            payer: mint_keypair,
++            guardians,
++            deployment_id,
++            lattice_genesis_hash,
++        };
++        fixture.bind_genesis();
++        fixture
++    }
++
++    fn header(&self, kind: u8, nonce: u64, lattice_genesis_hash: [u8; 32]) -> Header {
++        Header {
++            kind,
++            protocol_version: wire::PROTOCOL_VERSION,
++            scheme: wire::SCHEME_ED25519,
++            deployment_id: self.deployment_id,
++            solana_genesis_hash: SOLANA_GENESIS,
++            lattice_genesis_hash,
++            source_program_id: SOURCE_PROGRAM,
++            source_mint: SOURCE_MINT,
++            signer_epoch: 1,
++            nonce,
++        }
++    }
++
++    fn send(
++        &self,
++        instructions: &[Instruction],
++        extra_signers: &[&Keypair],
++    ) -> Result<(), TransactionError> {
++        let mut signers = vec![&self.payer];
++        signers.extend_from_slice(extra_signers);
++        let tx = Transaction::new_signed_with_payer(
++            instructions,
++            Some(&self.payer.pubkey()),
++            &signers,
++            self.bank.last_blockhash(),
++        );
++        self.bank.process_transaction(&tx)
++    }
++
++    /// Creates, fills and verifies an attestation in one transaction.
++    fn attest(&self, message: &[u8], signers: &[u8]) -> Pubkey {
++        let attestation = Keypair::new();
++        let count = signers.len() as u8;
++        let len = AttestationHeader::total_len(wire::SCHEME_ED25519, message.len() as u32, count)
++            .unwrap();
++        let digest = wire::digest(message);
++        let mut body = message.to_vec();
++        for index in signers {
++            body.push(*index);
++            body.extend_from_slice(&self.guardians[usize::from(*index)].sign(&digest).to_bytes());
++        }
++        let payer = self.payer.pubkey();
++        self.send(
++            &[
++                system_instruction::create_account(
++                    &payer,
++                    &attestation.pubkey(),
++                    self.bank.get_minimum_balance_for_rent_exemption(len),
++                    len as u64,
++                    &solana_lattice_bridge_program::id(),
++                ),
++                builders::init_attestation(
++                    &payer,
++                    &attestation.pubkey(),
++                    wire::SCHEME_ED25519,
++                    count,
++                    message.len() as u32,
++                ),
++                builders::write_attestation(&payer, &attestation.pubkey(), 0, body),
++                builders::verify_attestation(
++                    &attestation.pubkey(),
++                    &self.deployment_id,
++                    1,
++                    0,
++                    count,
++                ),
++            ],
++            &[&attestation],
++        )
++        .unwrap();
++        attestation.pubkey()
++    }
++
++    fn bind_genesis(&self) {
++        let message = wire::encode_governance(
++            &self.header(
++                wire::KIND_DESTINATION_GOVERNANCE,
++                0,
++                self.lattice_genesis_hash,
++            ),
++            &GovernanceAction::BindLatticeGenesis,
++        );
++        let attestation = self.attest(&message, &[0, 1]);
++        let capitalization = self.bank.capitalization();
++        self.send(
++            &[builders::govern(
++                &self.payer.pubkey(),
++                &attestation,
++                &self.deployment_id,
++                1,
++                None,
++            )],
++            &[],
++        )
++        .unwrap();
++        assert_eq!(self.bank.capitalization(), capitalization);
++        assert_eq!(self.state().lattice_genesis_hash, self.lattice_genesis_hash);
++    }
++
++    fn state(&self) -> BridgeState {
++        let address =
++            state::state_address(&solana_lattice_bridge_program::id(), &self.deployment_id).0;
++        BridgeState::decode(self.bank.get_account(&address).unwrap().data()).unwrap()
++    }
++
++    fn deposit(&self, sequence: u64, source_amount: u64, recipient: &Pubkey) -> Vec<u8> {
++        wire::encode_transfer(&Transfer {
++            header: self.header(wire::KIND_DEPOSIT, sequence, self.lattice_genesis_hash),
++            source_amount,
++            native_amount: source_amount * SCALE,
++            recipient: recipient.to_bytes(),
++            event_id: wire::deposit_event_id(&self.deployment_id, sequence),
++        })
++    }
++
++    fn mint(
++        &self,
++        sequence: u64,
++        recipient: &Pubkey,
++        attestation: &Pubkey,
++    ) -> Result<(), TransactionError> {
++        self.send(
++            &[builders::mint_from_deposit(
++                &self.payer.pubkey(),
++                attestation,
++                &self.deployment_id,
++                1,
++                sequence,
++                recipient,
++            )],
++            &[],
++        )
++    }
++}
++
++#[test]
++fn mint_and_burn_change_capitalization_exactly() {
++    let fixture = Fixture::new();
++    let recipient = Keypair::new();
++    let source_amount = 5_000_000; // 5 tokens at 6 decimals
++    let native = source_amount * SCALE;
++
++    let attestation = fixture.attest(
++        &fixture.deposit(0, source_amount, &recipient.pubkey()),
++        &[0, 2],
++    );
++    let before = fixture.bank.capitalization();
++    fixture.mint(0, &recipient.pubkey(), &attestation).unwrap();
++    assert_eq!(fixture.bank.capitalization(), before + native);
++    assert_eq!(fixture.bank.get_balance(&recipient.pubkey()), native);
++    let record_address = state::mint_record_address(
++        &solana_lattice_bridge_program::id(),
++        &fixture.deployment_id,
++        0,
++    )
++    .0;
++    let record =
++        MintRecord::decode(fixture.bank.get_account(&record_address).unwrap().data()).unwrap();
++    assert_eq!(record.native_amount, native);
++    assert_eq!(fixture.state().total_minted_native, u128::from(native));
++
++    // Replay with a fresh attestation fails and does not move supply.
++    let attestation = fixture.attest(
++        &fixture.deposit(0, source_amount, &recipient.pubkey()),
++        &[1, 2],
++    );
++    let before = fixture.bank.capitalization();
++    assert_eq!(
++        fixture.mint(0, &recipient.pubkey(), &attestation),
++        Err(TransactionError::InstructionError(
++            0,
++            InstructionError::Custom(u32::from(BridgeError::DepositAlreadyMinted))
++        ))
++    );
++    assert_eq!(fixture.bank.capitalization(), before);
++
++    // Burn 2 tokens: capitalization drops by exactly that amount.
++    let burn = 2_000_000 * SCALE;
++    let before = fixture.bank.capitalization();
++    fixture
++        .send(
++            &[builders::burn_for_withdrawal(
++                &recipient.pubkey(),
++                &fixture.deployment_id,
++                0,
++                burn,
++                [0x5A; 32],
++            )],
++            &[&recipient],
++        )
++        .unwrap();
++    assert_eq!(fixture.bank.capitalization(), before - burn);
++    let receipt_address = state::burn_receipt_address(
++        &solana_lattice_bridge_program::id(),
++        &fixture.deployment_id,
++        0,
++    )
++    .0;
++    let receipt =
++        BurnReceipt::decode(fixture.bank.get_account(&receipt_address).unwrap().data()).unwrap();
++    assert_eq!(receipt.native_amount, burn);
++    assert_eq!(receipt.source_amount, 2_000_000);
++    let bridge = fixture.state();
++    assert_eq!(bridge.outstanding_native, u128::from(native - burn));
++    assert_eq!(bridge.next_burn_sequence, 1);
++
++    fixture.bank.freeze();
++    assert_eq!(
++        fixture.bank.capitalization(),
++        fixture.bank.calculate_capitalization_for_tests()
++    );
++}
++
++#[test]
++fn bridge_ix_inside_failed_transaction_does_not_move_supply() {
++    let fixture = Fixture::new();
++    let recipient = Keypair::new();
++    let attestation = fixture.attest(&fixture.deposit(0, 1_000_000, &recipient.pubkey()), &[0, 1]);
++    let before = fixture.bank.capitalization();
++    // A valid mint followed by a failing instruction: the whole tx reverts.
++    let result = fixture.send(
++        &[
++            builders::mint_from_deposit(
++                &fixture.payer.pubkey(),
++                &attestation,
++                &fixture.deployment_id,
++                1,
++                0,
++                &recipient.pubkey(),
++            ),
++            system_instruction::transfer(&recipient.pubkey(), &fixture.payer.pubkey(), u64::MAX),
++        ],
++        &[&recipient],
++    );
++    assert!(result.is_err());
++    assert_eq!(fixture.bank.capitalization(), before);
++    assert_eq!(fixture.bank.get_balance(&recipient.pubkey()), 0);
++    assert_eq!(fixture.state().minted_count, 0);
++    fixture.bank.freeze();
++    assert_eq!(
++        fixture.bank.capitalization(),
++        fixture.bank.calculate_capitalization_for_tests()
++    );
++}
+-- 
+2.51.0
+

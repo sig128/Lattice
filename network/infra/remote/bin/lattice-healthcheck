@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Service health (cron, every 5 minutes): units active, website and RPC
+# answering through the gateway, slots advancing, genesis unchanged, and the
+# IP certificate not close to expiry. Alerts only on state changes.
+set -uo pipefail
+# shellcheck source=SCRIPTDIR/../lib/common.sh
+. /usr/local/lib/lattice/common.sh
+LATTICE_LOG_TAG=lattice-health
+require_root
+
+problems=()
+for unit in lattice-validator lattice-gateway lattice-web lattice-monitor caddy postgresql; do
+  systemctl is-active --quiet "${unit}" || problems+=("${unit} inactive")
+done
+curl -fsS --max-time 10 -o /dev/null http://127.0.0.1:3000/ || problems+=("web not answering")
+gateway_health="$(curl -fsS --max-time 10 -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' http://127.0.0.1:8080/rpc 2>/dev/null | jq -r '.result // empty')"
+[[ "${gateway_health}" == "ok" ]] || problems+=("gateway RPC getHealth=${gateway_health:-unavailable}")
+
+genesis="$(rpc_call getGenesisHash 2>/dev/null || true)"
+expected="$(env_get NEXT_PUBLIC_NATIVE_GENESIS_HASH)"
+[[ -z "${genesis}" || "${genesis}" == "${expected}" ]] || problems+=("genesis ${genesis} != configured ${expected}")
+
+slot="$(rpc_call getSlot 2>/dev/null || echo 0)"
+previous_slot="$(cat "${LATTICE_STATE}/last-slot" 2>/dev/null || echo 0)"
+if [[ "${slot}" =~ ^[0-9]+$ ]] && (( slot > 0 )); then
+  (( slot > previous_slot )) || problems+=("slot not advancing (${previous_slot} -> ${slot})")
+  echo "${slot}" >"${LATTICE_STATE}/last-slot"
+fi
+
+if [[ "$(cat "${LATTICE_STATE}/ip-tls" 2>/dev/null)" == "on" ]]; then
+  ip="$(env_get LATTICE_PUBLIC_IP)"
+  end="$(echo | openssl s_client -connect 127.0.0.1:443 -servername "${ip}" 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)"
+  if [[ -n "${end}" ]]; then
+    remaining=$(( ($(date -d "${end}" +%s) - $(date +%s)) / 3600 ))
+    (( remaining > 48 )) || problems+=("IP certificate expires in ${remaining}h")
+  else
+    problems+=("IP certificate unreadable")
+  fi
+fi
+
+if (( ${#problems[@]} )); then
+  message="$(IFS='; '; echo "${problems[*]}")"
+  alert_on_change health degraded 3600 "${message}" crit
+  echo "degraded: ${message}"
+  exit 1
+fi
+alert_on_change health ok 0 "all checks passing (slot ${slot})"
+echo "ok: slot ${slot}"

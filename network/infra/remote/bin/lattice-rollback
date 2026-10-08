@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Roll back the application or the validator binary.
+#
+#   lattice-rollback                 previous application release
+#   lattice-rollback <release-id>    a specific release (ls /opt/lattice/releases)
+#   lattice-rollback --validator     previous validator binary (restarts the validator)
+set -euo pipefail
+# shellcheck source=SCRIPTDIR/../lib/common.sh
+. /usr/local/lib/lattice/common.sh
+LATTICE_LOG_TAG=lattice-rollback
+require_root
+take_lock lattice-release
+
+if [[ "${1:-}" == "--validator" ]]; then
+  active="$(readlink -f "${LATTICE_BIN_DIR}/solana-test-validator")"
+  candidate="$(find "${LATTICE_BIN_DIR}" -maxdepth 1 -name 'solana-test-validator-*' -printf '%T@ %p\n' | sort -rn | cut -d' ' -f2- | grep -vx "${active}" | head -1)"
+  [[ -n "${candidate}" ]] || die "no other validator binary to roll back to"
+  log "validator: $("${active}" --version) -> $("${candidate}" --version)"
+  ln -sfn "${candidate}" "${LATTICE_BIN_DIR}/solana-test-validator.new"
+  mv -Tf "${LATTICE_BIN_DIR}/solana-test-validator.new" "${LATTICE_BIN_DIR}/solana-test-validator"
+  systemctl restart lattice-validator
+  wait_for_rpc 600 || die "validator unhealthy after rollback"
+  log "validator rolled back; slot $(rpc_call getSlot)"
+  exit 0
+fi
+
+current="$(readlink -f "${LATTICE_CURRENT}")"
+if [[ -n "${1:-}" ]]; then
+  target="${LATTICE_RELEASES}/$1"
+else
+  target="$(find "${LATTICE_RELEASES}" -mindepth 1 -maxdepth 1 -type d | sort -r | grep -vx "${current}" | while read -r dir; do
+    [[ "${dir}" < "${current}" ]] && { echo "${dir}"; break; }
+  done)"
+fi
+[[ -n "${target}" && -d "${target}/apps/web/.next" ]] || die "no usable release to roll back to"
+
+baked="$(jq -r '.genesisHash' "${target}/.lattice-release.json" 2>/dev/null || true)"
+live="$(env_get NEXT_PUBLIC_NATIVE_GENESIS_HASH)"
+if [[ "${baked}" != "${live}" ]]; then
+  die "release $(basename "${target}") was built for genesis ${baked}, live is ${live}; rebuild instead: lattice-release ${current}"
+fi
+
+log "rolling back $(basename "${current}") -> $(basename "${target}")"
+ln -sfn "${target}" "${LATTICE_CURRENT}.new"
+mv -Tf "${LATTICE_CURRENT}.new" "${LATTICE_CURRENT}"
+systemctl restart "${LATTICE_APP_UNITS[@]}" || true
+for _ in $(seq 1 30); do
+  curl -fsS --max-time 5 -o /dev/null http://127.0.0.1:3000/ && { log "rollback complete"; exit 0; }
+  sleep 2
+done
+die "web is not healthy after rollback (journalctl -u lattice-web)"

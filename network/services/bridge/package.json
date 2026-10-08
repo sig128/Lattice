@@ -1,0 +1,27 @@
+{
+  "name": "@lattice/bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./state": "./src/state.ts",
+    "./local": "./src/local.ts"
+  },
+  "scripts": {
+    "setup:local": "tsx src/setup-local.ts",
+    "record": "tsx src/recorder.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@lattice/config": "workspace:*",
+    "@lattice/protocol": "workspace:*",
+    "@solana/spl-token": "0.4.15",
+    "@solana/web3.js": "1.99.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.4",
+    "tsx": "4.23.15"
+  }
+}

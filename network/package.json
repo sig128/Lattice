@@ -1,0 +1,22 @@
+{
+  "name": "lattice-network",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.19.0",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @lattice/web dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck",
+    "monitor": "pnpm --filter @lattice/monitor start",
+    "validate:asset": "pnpm --filter @lattice/config validate:asset"
+  },
+  "devDependencies": {
+    "playwright": "1.64.0",
+    "typescript": "5.9.3",
+    "vitest": "5.0.3"
+  }
+}

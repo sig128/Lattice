@@ -1,0 +1,13 @@
+[Unit]
+Description=Lattice per-source connection limits for ports 80/443 (nftables)
+After=ufw.service
+Before=caddy.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/lattice/lattice-edge.nft
+ExecStop=/usr/sbin/nft delete table inet lattice_edge
+
+[Install]
+WantedBy=multi-user.target

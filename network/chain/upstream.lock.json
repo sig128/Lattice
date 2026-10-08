@@ -1,0 +1,9 @@
+{
+  "repository": "https://github.com/anza-xyz/agave.git",
+  "release": "v4.3.0",
+  "commit": "825efd18292aff6ffcf9daa0f7612f21b3531a72",
+  "releasedAt": "2026-09-18",
+  "selectedAt": "2026-10-08",
+  "status": "reference-pinned-not-vendored",
+  "notices": "Preserve upstream LICENSE and NOTICE files when source is fetched or distributed."
+}

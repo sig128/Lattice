@@ -1,0 +1,29 @@
+[package]
+name = "lattice-source-vault"
+version = "0.1.0"
+description = "Lattice bridge source vault: custody of the bound SPL mint on Solana, guardian-threshold releases"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+no-entrypoint = []
+# Referenced by solana_program::entrypoint!; unused here.
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+solana-program = "=4.0.0"
+solana-system-interface = { version = "=3.3.0", features = ["bincode"] }
+
+# Runtime behaviour is tested against a real validator (real Ed25519 precompile,
+# SPL Token, Token-2022, upgradeable loader) from services/relayer/test; see
+# programs/source-vault/README.md. In-crate tests cover pure logic only.
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
+
+[workspace]

@@ -1,0 +1,4932 @@
+From a331deca2399d0c5fbbbc1eff77a0d33133466ea Mon Sep 17 00:00:00 2001
+From: Lattice Bridge <bridge@lattice.local>
+Date: Thu, 8 Oct 2026 23:37:57 +0200
+Subject: [PATCH 5/7] lattice: lattice-bridge builtin for native LAT issuance
+ and burn
+
+Adds programs/lattice-bridge (solana-lattice-bridge-program), a builtin
+at Geuc2RbbzoWXSNYRyVDcjM5fZx6raKgf45y1bQr6aSzN gated by the new feature
+enable_lattice_bridge_program (EX9XkmgKPffcEKpHpStcMDwFixLVV6RG94XN1i1WcdWi),
+registered in BUILTINS without a Core BPF migration config.
+
+- MintFromDeposit: M-of-N guardian threshold (Ed25519, ML-DSA-65 or
+  hybrid, per guardian-set scheme) over the BRIDGE_SPEC wire-v1 DEPOSIT
+  message; exact SCALE conversion; exactly-once via the
+  ["minted", deployment, sequence] record PDA; per-epoch mint limit;
+  deposit pause; credits the recipient and records +amount.
+- BurnForWithdrawal: withdrawal pause; amount must be a whole source unit;
+  moves lamports into the state PDA, debits them and records -amount;
+  writes a LATBURN1 receipt at ["burn", deployment, sequence] with a
+  monotonic sequence.
+- Govern (kind 4): RotateGuardians (current threshold, epoch+1), SetPause,
+  SetLimits, SetPauser, BindLatticeGenesis; strictly sequential nonce.
+- Pause: optional pauser key may only pause.
+- Attestation staging accounts (Init/Write/Verify/Close) so ML-DSA-65
+  signatures can be verified across several transactions.
+
+All signature checks and PDA derivations are compute-metered. Unaudited.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+---
+ Cargo.lock                                    |   20 +
+ Cargo.toml                                    |    2 +
+ builtins/Cargo.toml                           |    1 +
+ builtins/src/lib.rs                           |   12 +
+ feature-set/src/lib.rs                        |   10 +
+ programs/lattice-bridge/Cargo.toml            |   53 +
+ programs/lattice-bridge/src/conversion.rs     |   85 ++
+ programs/lattice-bridge/src/error.rs          |   62 +
+ programs/lattice-bridge/src/genesis.rs        |  204 ++++
+ programs/lattice-bridge/src/guardian.rs       |  120 ++
+ programs/lattice-bridge/src/instruction.rs    |  329 ++++++
+ programs/lattice-bridge/src/lib.rs            |   45 +
+ programs/lattice-bridge/src/logic.rs          |  409 +++++++
+ programs/lattice-bridge/src/processor.rs      |  603 ++++++++++
+ .../lattice-bridge/src/processor/tests.rs     |  601 ++++++++++
+ programs/lattice-bridge/src/state.rs          |  633 ++++++++++
+ programs/lattice-bridge/src/tests.rs          | 1045 +++++++++++++++++
+ programs/lattice-bridge/src/wire.rs           |  472 ++++++++
+ 18 files changed, 4706 insertions(+)
+ create mode 100644 programs/lattice-bridge/Cargo.toml
+ create mode 100644 programs/lattice-bridge/src/conversion.rs
+ create mode 100644 programs/lattice-bridge/src/error.rs
+ create mode 100644 programs/lattice-bridge/src/genesis.rs
+ create mode 100644 programs/lattice-bridge/src/guardian.rs
+ create mode 100644 programs/lattice-bridge/src/instruction.rs
+ create mode 100644 programs/lattice-bridge/src/lib.rs
+ create mode 100644 programs/lattice-bridge/src/logic.rs
+ create mode 100644 programs/lattice-bridge/src/processor.rs
+ create mode 100644 programs/lattice-bridge/src/processor/tests.rs
+ create mode 100644 programs/lattice-bridge/src/state.rs
+ create mode 100644 programs/lattice-bridge/src/tests.rs
+ create mode 100644 programs/lattice-bridge/src/wire.rs
+
+diff --git a/Cargo.lock b/Cargo.lock
+index e6aea649d..18755e628 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -7573,6 +7573,7 @@ dependencies = [
+  "solana-bpf-loader-program",
+  "solana-compute-budget-program",
+  "solana-hash 4.6.0",
++ "solana-lattice-bridge-program",
+  "solana-program-runtime",
+  "solana-pubkey 4.3.0",
+  "solana-sdk-ids",
+@@ -9049,6 +9050,25 @@ dependencies = [
+  "wincode",
+ ]
+ 
++[[package]]
++name = "solana-lattice-bridge-program"
++version = "4.3.0"
++dependencies = [
++ "agave-mldsa-verify",
++ "ed25519-dalek 2.2.0",
++ "fips204",
++ "solana-account 4.5.0",
++ "solana-instruction",
++ "solana-program-runtime",
++ "solana-pubkey 4.3.0",
++ "solana-sdk-ids",
++ "solana-sha256-hasher",
++ "solana-svm-log-collector",
++ "solana-system-interface 3.3.0",
++ "solana-system-program",
++ "solana-transaction-context",
++]
++
+ [[package]]
+ name = "solana-lattice-hash"
+ version = "4.3.0"
+diff --git a/Cargo.toml b/Cargo.toml
+index bcc7e6108..c218da3b8 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -68,6 +68,7 @@ members = [
+     "programs/compute-budget",
+     "programs/compute-budget-bench",
+     "programs/ed25519-tests",
++    "programs/lattice-bridge",
+     "programs/system",
+     "programs/vote",
+     "programs/zk-elgamal-proof",
+@@ -421,6 +422,7 @@ solana-instructions-sysvar = "4.0.0"
+ solana-keccak-hasher = "3.1.0"
+ solana-keypair = "3.1.2"
+ solana-last-restart-slot = "3.2.0"
++solana-lattice-bridge-program = { path = "programs/lattice-bridge", version = "=4.3.0", features = ["agave-unstable-api"] }
+ solana-lattice-hash = { path = "lattice-hash", version = "=4.3.0", features = ["agave-unstable-api"] }
+ solana-leader-schedule = { path = "leader-schedule", version = "=4.3.0", features = ["agave-unstable-api"] }
+ solana-ledger = { path = "ledger", version = "=4.3.0", features = ["agave-unstable-api"] }
+diff --git a/builtins/Cargo.toml b/builtins/Cargo.toml
+index a04cc4ed1..c4721303f 100644
+--- a/builtins/Cargo.toml
++++ b/builtins/Cargo.toml
+@@ -24,6 +24,7 @@ agave-feature-set = { workspace = true }
+ solana-bpf-loader-program = { workspace = true, features = ["metrics"] }
+ solana-compute-budget-program = { workspace = true }
+ solana-hash = { workspace = true }
++solana-lattice-bridge-program = { workspace = true }
+ solana-program-runtime = { workspace = true }
+ solana-pubkey = { workspace = true }
+ solana-sdk-ids = { workspace = true }
+diff --git a/builtins/src/lib.rs b/builtins/src/lib.rs
+index 67605d116..808a71e7d 100644
+--- a/builtins/src/lib.rs
++++ b/builtins/src/lib.rs
+@@ -106,6 +106,16 @@ pub static BUILTINS: &[BuiltinPrototype] = &[
+         program_id: solana_sdk_ids::zk_elgamal_proof_program::id(),
+         register_fn: solana_zk_elgamal_proof_program::Entrypoint::register,
+     },
++    // Lattice fork: native LAT issuance/burn. The only program the runtime
++    // lets change native supply (see `TransactionContext::record_native_supply_change`).
++    // Never migrated to Core BPF.
++    BuiltinPrototype {
++        core_bpf_migration_config: None,
++        name: "lattice_bridge_program",
++        enable_feature_id: Some(feature_set::enable_lattice_bridge_program::id()),
++        program_id: solana_lattice_bridge_program::ID,
++        register_fn: solana_lattice_bridge_program::processor::Entrypoint::register,
++    },
+ ];
+ 
+ pub static STATELESS_BUILTINS: &[StatelessBuiltinPrototype] = &[];
+@@ -320,5 +330,7 @@ mod tests {
+             &super::BUILTINS[7].core_bpf_migration_config,
+             &Some(super::test_only::zk_elgamal_proof_program::CONFIG)
+         );
++        assert_eq!(&super::BUILTINS[8].core_bpf_migration_config, &None);
++        assert_eq!(super::BUILTINS[8].program_id, solana_lattice_bridge_program::ID);
+     }
+ }
+diff --git a/feature-set/src/lib.rs b/feature-set/src/lib.rs
+index b0cd6e3e4..2e0e126cd 100644
+--- a/feature-set/src/lib.rs
++++ b/feature-set/src/lib.rs
+@@ -1543,6 +1543,12 @@ pub mod enable_mldsa65_verify_syscall {
+     solana_pubkey::declare_id!("2e8mniAJiRxZz5JFAU2mX8KzCN6Z16GRGkBD7fnPF62P");
+ }
+ 
++/// Lattice fork: `lattice-bridge` builtin (native LAT issuance and burn).
++/// Id = base58(sha256("lattice:feature:enable_lattice_bridge_program:v1")).
++pub mod enable_lattice_bridge_program {
++    solana_pubkey::declare_id!("EX9XkmgKPffcEKpHpStcMDwFixLVV6RG94XN1i1WcdWi");
++}
++
+ pub mod double_disinflation_rate {
+     solana_pubkey::declare_id!("55oikhjJ2LUi1xdgJ17ueRyHFURZEw32asT3iAKfh7gg");
+     /// Taper (yearly disinflation rate) applied from activation onward.
+@@ -2639,6 +2645,10 @@ pub static FEATURE_NAMES: LazyLock<AHashMap<Pubkey, &'static str>> = LazyLock::n
+             enable_mldsa65_verify_syscall::id(),
+             "Lattice: ML-DSA-65 verify syscall (experimental fork)",
+         ),
++        (
++            enable_lattice_bridge_program::id(),
++            "Lattice: lattice-bridge native issuance builtin",
++        ),
+         /*************** ADD NEW FEATURES HERE ***************/
+         /***** ADD NEW FEATURE BOOL TO `FeatureSnapshot` *****/
+     ]
+diff --git a/programs/lattice-bridge/Cargo.toml b/programs/lattice-bridge/Cargo.toml
+new file mode 100644
+index 000000000..776827541
+--- /dev/null
++++ b/programs/lattice-bridge/Cargo.toml
+@@ -0,0 +1,53 @@
++[package]
++name = "solana-lattice-bridge-program"
++description = "Lattice native LAT issuance and burn builtin (destination side of the Lattice bridge)"
++version = { workspace = true }
++authors = { workspace = true }
++repository = { workspace = true }
++homepage = { workspace = true }
++license = { workspace = true }
++edition = { workspace = true }
++rust-version = { workspace = true }
++publish = false
++
++[lib]
++crate-type = ["lib"]
++name = "solana_lattice_bridge_program"
++
++[features]
++# Builtin processor; pulls in the program runtime. Without it the crate only
++# contains the pure wire/state/verification logic (cheap to build and test).
++agave-unstable-api = [
++    "dep:solana-instruction",
++    "dep:solana-program-runtime",
++    "dep:solana-sdk-ids",
++    "dep:solana-svm-log-collector",
++    "dep:solana-system-interface",
++    "dep:solana-transaction-context",
++]
++dev-context-only-utils = [
++    "agave-unstable-api",
++    "dep:solana-account",
++    "dep:solana-system-program",
++    "solana-program-runtime/dev-context-only-utils",
++]
++
++[dependencies]
++agave-mldsa-verify = { workspace = true }
++ed25519-dalek = { workspace = true }
++solana-account = { workspace = true, optional = true }
++solana-instruction = { workspace = true, features = ["std"], optional = true }
++solana-program-runtime = { workspace = true, optional = true }
++solana-pubkey = { workspace = true, features = ["curve25519", "std"] }
++solana-sdk-ids = { workspace = true, optional = true }
++solana-sha256-hasher = { workspace = true, features = ["sha2"] }
++solana-svm-log-collector = { workspace = true, optional = true }
++solana-system-interface = { workspace = true, optional = true }
++solana-system-program = { workspace = true, optional = true }
++solana-transaction-context = { workspace = true, optional = true }
++
++[dev-dependencies]
++fips204 = { workspace = true }
++
++[lints]
++workspace = true
+diff --git a/programs/lattice-bridge/src/conversion.rs b/programs/lattice-bridge/src/conversion.rs
+new file mode 100644
+index 000000000..f2861d4a9
+--- /dev/null
++++ b/programs/lattice-bridge/src/conversion.rs
+@@ -0,0 +1,85 @@
++//! Decimal conversion between the Solana source token and native LAT
++//! (BRIDGE_SPEC §1).
++//!
++//! LAT has 9 decimals. The source mint has `source_decimals <= 9`, so
++//! `SCALE = 10^(9 - source_decimals)` and the mapping is exact in both
++//! directions: deposits multiply (no dust) and burns must be a multiple of
++//! `SCALE` (otherwise rejected, never rounded).
++
++use crate::error::{BridgeError, BridgeResult};
++
++pub const NATIVE_DECIMALS: u8 = 9;
++
++pub fn scale(source_decimals: u8) -> BridgeResult<u64> {
++    let exponent = NATIVE_DECIMALS
++        .checked_sub(source_decimals)
++        .ok_or(BridgeError::UnsupportedDecimals)?;
++    10u64
++        .checked_pow(u32::from(exponent))
++        .ok_or(BridgeError::UnsupportedDecimals)
++}
++
++/// Native lamports credited for a deposit of `source_amount` atomic units.
++pub fn source_to_native(source_amount: u64, source_decimals: u8) -> BridgeResult<u64> {
++    if source_amount == 0 {
++        return Err(BridgeError::ZeroAmount);
++    }
++    source_amount
++        .checked_mul(scale(source_decimals)?)
++        .ok_or(BridgeError::Overflow)
++}
++
++/// Source atomic units released for a burn of `native_amount` lamports.
++pub fn native_to_source(native_amount: u64, source_decimals: u8) -> BridgeResult<u64> {
++    if native_amount == 0 {
++        return Err(BridgeError::ZeroAmount);
++    }
++    let scale = scale(source_decimals)?;
++    if native_amount.checked_rem(scale) != Some(0) {
++        return Err(BridgeError::NotMultipleOfScale);
++    }
++    native_amount
++        .checked_div(scale)
++        .ok_or(BridgeError::UnsupportedDecimals)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn scale_matches_spec() {
++        assert_eq!(scale(9), Ok(1));
++        assert_eq!(scale(6), Ok(1_000));
++        assert_eq!(scale(0), Ok(1_000_000_000));
++        assert_eq!(scale(10), Err(BridgeError::UnsupportedDecimals));
++    }
++
++    #[test]
++    fn deposit_multiplies_exactly() {
++        assert_eq!(source_to_native(1_500_000, 6), Ok(1_500_000_000));
++        assert_eq!(source_to_native(7, 9), Ok(7));
++        assert_eq!(source_to_native(0, 6), Err(BridgeError::ZeroAmount));
++        assert_eq!(source_to_native(u64::MAX, 6), Err(BridgeError::Overflow));
++        assert_eq!(source_to_native(u64::MAX, 9), Ok(u64::MAX));
++    }
++
++    #[test]
++    fn burn_requires_multiple_of_scale() {
++        assert_eq!(native_to_source(1_500_000_000, 6), Ok(1_500_000));
++        assert_eq!(
++            native_to_source(1_500_000_001, 6),
++            Err(BridgeError::NotMultipleOfScale)
++        );
++        assert_eq!(native_to_source(0, 6), Err(BridgeError::ZeroAmount));
++        assert_eq!(native_to_source(5, 9), Ok(5));
++    }
++
++    #[test]
++    fn round_trip_is_identity() {
++        for decimals in 0..=9u8 {
++            let native = source_to_native(12_345, decimals).unwrap();
++            assert_eq!(native_to_source(native, decimals), Ok(12_345));
++        }
++    }
++}
+diff --git a/programs/lattice-bridge/src/error.rs b/programs/lattice-bridge/src/error.rs
+new file mode 100644
+index 000000000..893f1a62d
+--- /dev/null
++++ b/programs/lattice-bridge/src/error.rs
+@@ -0,0 +1,62 @@
++//! Error codes returned as `InstructionError::Custom(code)`.
++
++/// Stable error codes. Never renumber; append only.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++#[repr(u32)]
++pub enum BridgeError {
++    // Wire / encoding
++    MalformedMessage = 1,
++    WrongDomain = 2,
++    WrongKind = 3,
++    WrongProtocolVersion = 4,
++    WrongScheme = 5,
++    WrongDeployment = 6,
++    WrongSolanaGenesis = 7,
++    WrongLatticeGenesis = 8,
++    WrongSourceProgram = 9,
++    WrongSourceMint = 10,
++    WrongSignerEpoch = 11,
++    WrongEventId = 12,
++    WrongNonce = 13,
++    ZeroRecipient = 14,
++    // Amounts
++    ZeroAmount = 20,
++    AmountMismatch = 21,
++    NotMultipleOfScale = 22,
++    UnsupportedDecimals = 23,
++    Overflow = 24,
++    MintRateLimitExceeded = 25,
++    BurnExceedsOutstanding = 26,
++    // State
++    DepositsPaused = 30,
++    WithdrawalsPaused = 31,
++    LatticeGenesisNotBound = 32,
++    LatticeGenesisAlreadyBound = 33,
++    DepositAlreadyMinted = 34,
++    InvalidStateAccount = 35,
++    InvalidGuardianSetAccount = 36,
++    InvalidAttestationAccount = 37,
++    InvalidRecordAccount = 38,
++    NotPauser = 39,
++    UnpauseNotAllowed = 40,
++    InvalidRecipientAccount = 41,
++    // Guardians / signatures
++    InvalidGuardianSet = 50,
++    InvalidGuardianIndex = 51,
++    InvalidSignature = 52,
++    BelowThreshold = 53,
++    AttestationSealed = 54,
++    AttestationNotSealed = 55,
++    AttestationWriter = 56,
++    AttestationOutOfBounds = 57,
++    UnknownGovernanceAction = 58,
++    WrongNewEpoch = 59,
++}
++
++impl From<BridgeError> for u32 {
++    fn from(error: BridgeError) -> u32 {
++        error as u32
++    }
++}
++
++pub type BridgeResult<T> = Result<T, BridgeError>;
+diff --git a/programs/lattice-bridge/src/genesis.rs b/programs/lattice-bridge/src/genesis.rs
+new file mode 100644
+index 000000000..801c42691
+--- /dev/null
++++ b/programs/lattice-bridge/src/genesis.rs
+@@ -0,0 +1,204 @@
++//! Genesis accounts for a Lattice bridge deployment and the genesis supply
++//! report used by `solana-genesis --lattice-network`.
++//!
++//! Supply model (docs/NATIVE_ISSUANCE.md §Genesis):
++//! - Lattice mainnet issues no unbacked lamports. Every lamport in genesis
++//!   (validator identity/vote/stake accounts, bridge accounts, programs,
++//!   sysvar-adjacent genesis accounts) plus a reserve for the balances the
++//!   runtime itself creates at slot 0 (sysvars, builtin program accounts)
++//!   must be covered by *bootstrap deposits*: ordinary source-vault deposits
++//!   finalized on Solana before launch.
++//! - Each bootstrap deposit becomes a pre-consumed `LATMINT1` record in
++//!   genesis, so the relayer can never mint it again, and is counted in
++//!   `total_minted_native`. The LAT it backs is the genesis allocation.
++//! - Testnet/development genesis may contain unbacked lamports (faucet). The
++//!   amount is written to `genesis_unbacked_native` and labelled as such.
++
++use {
++    crate::{
++        conversion,
++        error::BridgeError,
++        state::{
++            self, BridgeState, GuardianSet, MINT_RECORD_LEN, MintRecord, NETWORK_DEVELOPMENT,
++            NETWORK_MAINNET, NETWORK_TESTNET, STATE_LEN,
++        },
++        wire,
++    },
++    solana_pubkey::Pubkey,
++};
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct BootstrapDeposit {
++    /// Source-vault `deposit_sequence` of a deposit finalized before launch.
++    pub sequence: u64,
++    /// Credited source atomic units of that deposit receipt.
++    pub source_amount: u64,
++    /// Lattice recipient recorded in the Solana deposit receipt.
++    pub recipient: [u8; 32],
++}
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct GenesisBridgeConfig {
++    pub network: u8,
++    pub deployment_id: [u8; 32],
++    pub solana_genesis_hash: [u8; 32],
++    pub source_program_id: [u8; 32],
++    pub source_mint: [u8; 32],
++    pub source_decimals: u8,
++    /// Initial Lattice guardian registry (epoch 1 per BRIDGE_SPEC §4).
++    pub guardian_set: GuardianSet,
++    pub pauser: [u8; 32],
++    pub max_mint_per_epoch: u64,
++    pub bootstrap_deposits: Vec<BootstrapDeposit>,
++}
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct GenesisBridgeAccount {
++    pub address: Pubkey,
++    pub lamports: u64,
++    pub data: Vec<u8>,
++}
++
++#[derive(Clone, Debug, Default, PartialEq, Eq)]
++pub struct GenesisSupplyReport {
++    /// LAT backed by bootstrap deposits (sum of their native amounts).
++    pub backed_native: u64,
++    /// Lamports held by the bridge's own genesis accounts.
++    pub bridge_account_lamports: u64,
++    /// All genesis account lamports, including the bridge accounts.
++    pub genesis_account_lamports: u64,
++    /// Allowance for balances created by the runtime at slot 0.
++    pub runtime_reserve_lamports: u64,
++    /// `genesis_account_lamports + runtime_reserve - backed`, floored at 0.
++    pub unbacked_native: u64,
++}
++
++fn err(e: BridgeError, what: &str) -> String {
++    format!("{what}: {e:?}")
++}
++
++/// Builds the state, initial guardian set and pre-consumed mint records.
++/// `other_genesis_lamports` is the sum over every non-bridge genesis account.
++pub fn build_genesis_accounts(
++    config: &GenesisBridgeConfig,
++    program_id: &Pubkey,
++    other_genesis_lamports: u64,
++    runtime_reserve_lamports: u64,
++    rent_exempt_minimum: impl Fn(usize) -> u64,
++) -> Result<(Vec<GenesisBridgeAccount>, GenesisSupplyReport), String> {
++    if ![NETWORK_MAINNET, NETWORK_TESTNET, NETWORK_DEVELOPMENT].contains(&config.network) {
++        return Err(format!("unknown network {}", config.network));
++    }
++    conversion::scale(config.source_decimals).map_err(|e| err(e, "source_decimals"))?;
++    let mut set = config.guardian_set.clone();
++    set.deployment_id = config.deployment_id;
++    set.validate().map_err(|e| err(e, "guardian set"))?;
++    if set.epoch == 0 {
++        return Err("guardian set epoch must be >= 1".to_string());
++    }
++
++    let mut accounts = Vec::new();
++    let mut backed_native = 0u64;
++    let mut sequences = std::collections::BTreeSet::new();
++    for deposit in &config.bootstrap_deposits {
++        if !sequences.insert(deposit.sequence) {
++            return Err(format!(
++                "duplicate bootstrap deposit sequence {}",
++                deposit.sequence
++            ));
++        }
++        if deposit.recipient == [0; 32] {
++            return Err(format!(
++                "bootstrap deposit {} has a zero recipient",
++                deposit.sequence
++            ));
++        }
++        let native = conversion::source_to_native(deposit.source_amount, config.source_decimals)
++            .map_err(|e| err(e, "bootstrap deposit amount"))?;
++        backed_native = backed_native
++            .checked_add(native)
++            .ok_or("bootstrap total overflows u64")?;
++        let (address, _) =
++            state::mint_record_address(program_id, &config.deployment_id, deposit.sequence);
++        let record = MintRecord {
++            deployment_id: config.deployment_id,
++            deposit_sequence: deposit.sequence,
++            recipient: deposit.recipient,
++            native_amount: native,
++            slot: 0,
++            event_id: wire::deposit_event_id(&config.deployment_id, deposit.sequence),
++        };
++        accounts.push(GenesisBridgeAccount {
++            address,
++            lamports: rent_exempt_minimum(MINT_RECORD_LEN),
++            data: record.encode(),
++        });
++    }
++
++    let (set_address, set_bump) =
++        state::guardian_set_address(program_id, &config.deployment_id, set.epoch);
++    set.bump = set_bump;
++    let set_data = set.encode().map_err(|e| err(e, "guardian set"))?;
++    accounts.push(GenesisBridgeAccount {
++        address: set_address,
++        lamports: rent_exempt_minimum(set_data.len()),
++        data: set_data,
++    });
++
++    let (state_address, state_bump) = state::state_address(program_id, &config.deployment_id);
++    let state_lamports = rent_exempt_minimum(STATE_LEN);
++    let bridge_account_lamports = accounts
++        .iter()
++        .map(|account| account.lamports)
++        .try_fold(state_lamports, u64::checked_add)
++        .ok_or("bridge account lamports overflow")?;
++    let genesis_account_lamports = other_genesis_lamports
++        .checked_add(bridge_account_lamports)
++        .ok_or("genesis lamports overflow")?;
++    let required = genesis_account_lamports
++        .checked_add(runtime_reserve_lamports)
++        .ok_or("genesis lamports overflow")?;
++    let unbacked_native = required.saturating_sub(backed_native);
++    if config.network == NETWORK_MAINNET && unbacked_native != 0 {
++        return Err(format!(
++            "Lattice mainnet genesis would issue {unbacked_native} unbacked lamports: genesis \
++             accounts {genesis_account_lamports} + runtime reserve {runtime_reserve_lamports} \
++             exceed bootstrap deposits {backed_native}"
++        ));
++    }
++
++    let bridge_state = BridgeState {
++        deployment_id: config.deployment_id,
++        minted_count: config.bootstrap_deposits.len() as u64,
++        total_minted_native: u128::from(backed_native),
++        guardian_epoch: set.epoch,
++        bump: state_bump,
++        source_decimals: config.source_decimals,
++        network: config.network,
++        solana_genesis_hash: config.solana_genesis_hash,
++        source_program_id: config.source_program_id,
++        source_mint: config.source_mint,
++        pauser: config.pauser,
++        max_mint_per_epoch: config.max_mint_per_epoch,
++        genesis_bootstrap_native: backed_native,
++        genesis_unbacked_native: unbacked_native,
++        outstanding_native: u128::from(backed_native),
++        ..BridgeState::default()
++    };
++    accounts.push(GenesisBridgeAccount {
++        address: state_address,
++        lamports: state_lamports,
++        data: bridge_state.encode(),
++    });
++
++    Ok((
++        accounts,
++        GenesisSupplyReport {
++            backed_native,
++            bridge_account_lamports,
++            genesis_account_lamports,
++            runtime_reserve_lamports,
++            unbacked_native,
++        },
++    ))
++}
+diff --git a/programs/lattice-bridge/src/guardian.rs b/programs/lattice-bridge/src/guardian.rs
+new file mode 100644
+index 000000000..2e924a6f8
+--- /dev/null
++++ b/programs/lattice-bridge/src/guardian.rs
+@@ -0,0 +1,120 @@
++//! Guardian signature verification under the scheme declared by the
++//! guardian set (BRIDGE_SPEC §3.3):
++//!
++//! - scheme 1: Ed25519 (`verify_strict`, as the ed25519 precompile) over
++//!   `SHA-256(message)`;
++//! - scheme 2: ML-DSA-65 (FIPS 204 pure, empty context) over the same digest,
++//!   via `agave-mldsa-verify` (the verifier behind `sol_mldsa65_verify`);
++//! - scheme 3 (hybrid): the same guardian index must provide BOTH, and both
++//!   must verify, for that guardian to count once toward the threshold.
++//!
++//! Every provided entry must verify; one bad entry fails the instruction.
++//! Compute units are charged before each individual verification.
++
++use {
++    crate::{
++        error::BridgeError,
++        state::{GuardianSet, signature_entry_len},
++        wire,
++    },
++    agave_mldsa_verify::{MLDSA65_SIGNATURE_LEN, MLDSA65_VERSION_V1},
++};
++
++/// Calibrated by ratio to the fork's ML-DSA-65 calibration (108.7 µs ->
++/// 30,000 CU, see docs/QUANTUM.md): ed25519-dalek `verify_strict` is roughly
++/// 40-45 µs on the same class of host. Re-measure on validator hardware.
++pub const ED25519_VERIFY_COST: u64 = 12_000;
++
++pub fn mldsa65_verify_cost() -> u64 {
++    agave_mldsa_verify::verify_cost(32)
++}
++
++pub fn verify_ed25519(public_key: &[u8; 32], digest: &[u8; 32], signature: &[u8]) -> bool {
++    let Ok(signature) = <[u8; 64]>::try_from(signature) else {
++        return false;
++    };
++    let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(public_key) else {
++        return false;
++    };
++    key.verify_strict(digest, &ed25519_dalek::Signature::from_bytes(&signature))
++        .is_ok()
++}
++
++pub fn verify_mldsa65(public_key: &[u8], digest: &[u8; 32], signature: &[u8]) -> bool {
++    agave_mldsa_verify::verify(MLDSA65_VERSION_V1, public_key, digest, signature).is_ok()
++}
++
++/// Verifies signature entries `[first, first + count)` of `signatures`
++/// against `set` and returns the bitmap of guardian indices they prove.
++pub fn verify_entries<E, F>(
++    set: &GuardianSet,
++    digest: &[u8; 32],
++    signatures: &[u8],
++    first: usize,
++    count: usize,
++    charge: &mut F,
++) -> Result<u32, E>
++where
++    E: From<BridgeError>,
++    F: FnMut(u64) -> Result<(), E>,
++{
++    let entry_len = signature_entry_len(set.scheme)?;
++    let end = first
++        .checked_add(count)
++        .and_then(|end| end.checked_mul(entry_len))
++        .ok_or(BridgeError::AttestationOutOfBounds)?;
++    let start = first
++        .checked_mul(entry_len)
++        .ok_or(BridgeError::AttestationOutOfBounds)?;
++    let entries = signatures
++        .get(start..end)
++        .ok_or(BridgeError::AttestationOutOfBounds)?;
++    let mut bitmap = 0u32;
++    for entry in entries.chunks_exact(entry_len) {
++        let (index, mut rest) = entry.split_first().ok_or(BridgeError::MalformedMessage)?;
++        let key = set
++            .keys
++            .get(usize::from(*index))
++            .ok_or(BridgeError::InvalidGuardianIndex)?;
++        if wire::scheme_has_ed25519(set.scheme) {
++            let (signature, tail) = rest
++                .split_at_checked(64)
++                .ok_or(BridgeError::MalformedMessage)?;
++            rest = tail;
++            charge(ED25519_VERIFY_COST)?;
++            let public_key = key
++                .ed25519
++                .as_ref()
++                .ok_or(BridgeError::InvalidGuardianSet)?;
++            if !verify_ed25519(public_key, digest, signature) {
++                return Err(BridgeError::InvalidSignature.into());
++            }
++        }
++        if wire::scheme_has_mldsa65(set.scheme) {
++            let signature = rest
++                .get(..MLDSA65_SIGNATURE_LEN)
++                .ok_or(BridgeError::MalformedMessage)?;
++            charge(mldsa65_verify_cost())?;
++            let public_key = key
++                .mldsa65
++                .as_ref()
++                .ok_or(BridgeError::InvalidGuardianSet)?;
++            if !verify_mldsa65(public_key, digest, signature) {
++                return Err(BridgeError::InvalidSignature.into());
++            }
++        }
++        bitmap |= 1u32
++            .checked_shl(u32::from(*index))
++            .ok_or(BridgeError::InvalidGuardianIndex)?;
++    }
++    Ok(bitmap)
++}
++
++/// Number of distinct guardians proven by `bitmap` within a set of `count`.
++pub fn signers(bitmap: u32, count: usize) -> u32 {
++    let mask = 1u32
++        .checked_shl(u32::try_from(count).unwrap_or(32))
++        .map(|bit| bit.wrapping_sub(1))
++        .unwrap_or(u32::MAX);
++    (bitmap & mask).count_ones()
++}
+diff --git a/programs/lattice-bridge/src/instruction.rs b/programs/lattice-bridge/src/instruction.rs
+new file mode 100644
+index 000000000..d8ed4c11f
+--- /dev/null
++++ b/programs/lattice-bridge/src/instruction.rs
+@@ -0,0 +1,329 @@
++//! Instruction encoding: a 1-byte tag followed by fixed little-endian fields.
++//! Account lists are documented on each variant and in docs/NATIVE_ISSUANCE.md.
++
++use crate::{
++    error::{BridgeError, BridgeResult},
++    wire::{a32, u8_at, u64_at},
++};
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub enum BridgeInstruction {
++    /// `[writer (signer), attestation (writable, owned by this program, zeroed)]`
++    InitAttestation {
++        scheme: u8,
++        signature_count: u8,
++        message_len: u32,
++    },
++    /// `[writer (signer), attestation (writable)]`; `offset` is relative to
++    /// the start of the message area. Rejected once sealed.
++    WriteAttestation { offset: u32, data: Vec<u8> },
++    /// `[attestation (writable), state, guardian set (current epoch)]`
++    VerifyAttestation { first: u8, count: u8 },
++    /// `[writer (signer, writable), attestation (writable)]`
++    CloseAttestation,
++    /// `[payer = attestation writer (signer, writable), state (writable),
++    ///   guardian set, attestation (writable), mint record PDA (writable),
++    ///   recipient (writable), system program]`
++    MintFromDeposit,
++    /// `[burner (signer, writable), state (writable),
++    ///   burn receipt PDA (writable), system program]`
++    BurnForWithdrawal {
++        native_amount: u64,
++        solana_recipient: [u8; 32],
++    },
++    /// `[payer = attestation writer (signer, writable), state (writable),
++    ///   guardian set, attestation (writable), system program,
++    ///   new guardian set PDA (writable; RotateGuardians only)]`
++    Govern,
++    /// `[pauser (signer), state (writable)]`; 1 = pause, 0 = leave unchanged.
++    Pause { deposits: u8, withdrawals: u8 },
++}
++
++pub const TAG_INIT_ATTESTATION: u8 = 0;
++pub const TAG_WRITE_ATTESTATION: u8 = 1;
++pub const TAG_VERIFY_ATTESTATION: u8 = 2;
++pub const TAG_CLOSE_ATTESTATION: u8 = 3;
++pub const TAG_MINT_FROM_DEPOSIT: u8 = 4;
++pub const TAG_BURN_FOR_WITHDRAWAL: u8 = 5;
++pub const TAG_GOVERN: u8 = 6;
++pub const TAG_PAUSE: u8 = 7;
++
++fn u32_at(d: &[u8], o: usize) -> BridgeResult<u32> {
++    d.get(o..o.saturating_add(4))
++        .and_then(|s| <[u8; 4]>::try_from(s).ok())
++        .map(u32::from_le_bytes)
++        .ok_or(BridgeError::MalformedMessage)
++}
++
++impl BridgeInstruction {
++    pub fn encode(&self) -> Vec<u8> {
++        let mut out = Vec::new();
++        match self {
++            Self::InitAttestation {
++                scheme,
++                signature_count,
++                message_len,
++            } => {
++                out.extend_from_slice(&[TAG_INIT_ATTESTATION, *scheme, *signature_count]);
++                out.extend_from_slice(&message_len.to_le_bytes());
++            }
++            Self::WriteAttestation { offset, data } => {
++                out.push(TAG_WRITE_ATTESTATION);
++                out.extend_from_slice(&offset.to_le_bytes());
++                out.extend_from_slice(data);
++            }
++            Self::VerifyAttestation { first, count } => {
++                out.extend_from_slice(&[TAG_VERIFY_ATTESTATION, *first, *count]);
++            }
++            Self::CloseAttestation => out.push(TAG_CLOSE_ATTESTATION),
++            Self::MintFromDeposit => out.push(TAG_MINT_FROM_DEPOSIT),
++            Self::BurnForWithdrawal {
++                native_amount,
++                solana_recipient,
++            } => {
++                out.push(TAG_BURN_FOR_WITHDRAWAL);
++                out.extend_from_slice(&native_amount.to_le_bytes());
++                out.extend_from_slice(solana_recipient);
++            }
++            Self::Govern => out.push(TAG_GOVERN),
++            Self::Pause {
++                deposits,
++                withdrawals,
++            } => out.extend_from_slice(&[TAG_PAUSE, *deposits, *withdrawals]),
++        }
++        out
++    }
++
++    pub fn decode(d: &[u8]) -> BridgeResult<Self> {
++        let exact = |len: usize, value: Self| {
++            if d.len() == len {
++                Ok(value)
++            } else {
++                Err(BridgeError::MalformedMessage)
++            }
++        };
++        match u8_at(d, 0)? {
++            TAG_INIT_ATTESTATION => exact(
++                7,
++                Self::InitAttestation {
++                    scheme: u8_at(d, 1)?,
++                    signature_count: u8_at(d, 2)?,
++                    message_len: u32_at(d, 3)?,
++                },
++            ),
++            TAG_WRITE_ATTESTATION => Ok(Self::WriteAttestation {
++                offset: u32_at(d, 1)?,
++                data: d.get(5..).ok_or(BridgeError::MalformedMessage)?.to_vec(),
++            }),
++            TAG_VERIFY_ATTESTATION => exact(
++                3,
++                Self::VerifyAttestation {
++                    first: u8_at(d, 1)?,
++                    count: u8_at(d, 2)?,
++                },
++            ),
++            TAG_CLOSE_ATTESTATION => exact(1, Self::CloseAttestation),
++            TAG_MINT_FROM_DEPOSIT => exact(1, Self::MintFromDeposit),
++            TAG_BURN_FOR_WITHDRAWAL => exact(
++                41,
++                Self::BurnForWithdrawal {
++                    native_amount: u64_at(d, 1)?,
++                    solana_recipient: a32(d, 9)?,
++                },
++            ),
++            TAG_GOVERN => exact(1, Self::Govern),
++            TAG_PAUSE => exact(
++                3,
++                Self::Pause {
++                    deposits: u8_at(d, 1)?,
++                    withdrawals: u8_at(d, 2)?,
++                },
++            ),
++            _ => Err(BridgeError::MalformedMessage),
++        }
++    }
++}
++
++#[cfg(feature = "agave-unstable-api")]
++pub mod builders {
++    //! Client-side instruction builders.
++    use {
++        super::BridgeInstruction,
++        crate::state,
++        solana_instruction::{AccountMeta, Instruction},
++        solana_pubkey::Pubkey,
++    };
++
++    fn ix(data: BridgeInstruction, accounts: Vec<AccountMeta>) -> Instruction {
++        Instruction::new_with_bytes(crate::id(), &data.encode(), accounts)
++    }
++
++    pub fn init_attestation(
++        writer: &Pubkey,
++        attestation: &Pubkey,
++        scheme: u8,
++        signature_count: u8,
++        message_len: u32,
++    ) -> Instruction {
++        ix(
++            BridgeInstruction::InitAttestation {
++                scheme,
++                signature_count,
++                message_len,
++            },
++            vec![
++                AccountMeta::new_readonly(*writer, true),
++                AccountMeta::new(*attestation, false),
++            ],
++        )
++    }
++
++    pub fn write_attestation(
++        writer: &Pubkey,
++        attestation: &Pubkey,
++        offset: u32,
++        data: Vec<u8>,
++    ) -> Instruction {
++        ix(
++            BridgeInstruction::WriteAttestation { offset, data },
++            vec![
++                AccountMeta::new_readonly(*writer, true),
++                AccountMeta::new(*attestation, false),
++            ],
++        )
++    }
++
++    pub fn verify_attestation(
++        attestation: &Pubkey,
++        deployment_id: &[u8; 32],
++        epoch: u64,
++        first: u8,
++        count: u8,
++    ) -> Instruction {
++        let program_id = crate::id();
++        ix(
++            BridgeInstruction::VerifyAttestation { first, count },
++            vec![
++                AccountMeta::new(*attestation, false),
++                AccountMeta::new_readonly(
++                    state::state_address(&program_id, deployment_id).0,
++                    false,
++                ),
++                AccountMeta::new_readonly(
++                    state::guardian_set_address(&program_id, deployment_id, epoch).0,
++                    false,
++                ),
++            ],
++        )
++    }
++
++    pub fn close_attestation(writer: &Pubkey, attestation: &Pubkey) -> Instruction {
++        ix(
++            BridgeInstruction::CloseAttestation,
++            vec![
++                AccountMeta::new(*writer, true),
++                AccountMeta::new(*attestation, false),
++            ],
++        )
++    }
++
++    pub fn mint_from_deposit(
++        payer: &Pubkey,
++        attestation: &Pubkey,
++        deployment_id: &[u8; 32],
++        epoch: u64,
++        deposit_sequence: u64,
++        recipient: &Pubkey,
++    ) -> Instruction {
++        let program_id = crate::id();
++        ix(
++            BridgeInstruction::MintFromDeposit,
++            vec![
++                AccountMeta::new(*payer, true),
++                AccountMeta::new(state::state_address(&program_id, deployment_id).0, false),
++                AccountMeta::new_readonly(
++                    state::guardian_set_address(&program_id, deployment_id, epoch).0,
++                    false,
++                ),
++                AccountMeta::new(*attestation, false),
++                AccountMeta::new(
++                    state::mint_record_address(&program_id, deployment_id, deposit_sequence).0,
++                    false,
++                ),
++                AccountMeta::new(*recipient, false),
++                AccountMeta::new_readonly(solana_sdk_ids::system_program::id(), false),
++            ],
++        )
++    }
++
++    pub fn burn_for_withdrawal(
++        burner: &Pubkey,
++        deployment_id: &[u8; 32],
++        burn_sequence: u64,
++        native_amount: u64,
++        solana_recipient: [u8; 32],
++    ) -> Instruction {
++        let program_id = crate::id();
++        ix(
++            BridgeInstruction::BurnForWithdrawal {
++                native_amount,
++                solana_recipient,
++            },
++            vec![
++                AccountMeta::new(*burner, true),
++                AccountMeta::new(state::state_address(&program_id, deployment_id).0, false),
++                AccountMeta::new(
++                    state::burn_receipt_address(&program_id, deployment_id, burn_sequence).0,
++                    false,
++                ),
++                AccountMeta::new_readonly(solana_sdk_ids::system_program::id(), false),
++            ],
++        )
++    }
++
++    /// `new_epoch` is `Some` only for a RotateGuardians message.
++    pub fn govern(
++        payer: &Pubkey,
++        attestation: &Pubkey,
++        deployment_id: &[u8; 32],
++        epoch: u64,
++        new_epoch: Option<u64>,
++    ) -> Instruction {
++        let program_id = crate::id();
++        let mut accounts = vec![
++            AccountMeta::new(*payer, true),
++            AccountMeta::new(state::state_address(&program_id, deployment_id).0, false),
++            AccountMeta::new_readonly(
++                state::guardian_set_address(&program_id, deployment_id, epoch).0,
++                false,
++            ),
++            AccountMeta::new(*attestation, false),
++            AccountMeta::new_readonly(solana_sdk_ids::system_program::id(), false),
++        ];
++        if let Some(new_epoch) = new_epoch {
++            accounts.push(AccountMeta::new(
++                state::guardian_set_address(&program_id, deployment_id, new_epoch).0,
++                false,
++            ));
++        }
++        ix(BridgeInstruction::Govern, accounts)
++    }
++
++    pub fn pause(
++        pauser: &Pubkey,
++        deployment_id: &[u8; 32],
++        deposits: u8,
++        withdrawals: u8,
++    ) -> Instruction {
++        ix(
++            BridgeInstruction::Pause {
++                deposits,
++                withdrawals,
++            },
++            vec![
++                AccountMeta::new_readonly(*pauser, true),
++                AccountMeta::new(state::state_address(&crate::id(), deployment_id).0, false),
++            ],
++        )
++    }
++}
+diff --git a/programs/lattice-bridge/src/lib.rs b/programs/lattice-bridge/src/lib.rs
+new file mode 100644
+index 000000000..a1208aa02
+--- /dev/null
++++ b/programs/lattice-bridge/src/lib.rs
+@@ -0,0 +1,45 @@
++//! Lattice native bridge builtin (`lattice-bridge`): the destination side of
++//! the Solana SPL ↔ native LAT bridge, and the only path that creates or
++//! destroys native lamports outside genesis, fees and the upstream runtime.
++//!
++//! - `MintFromDeposit` credits exactly the attested amount of a Solana
++//!   deposit after an M-of-N guardian threshold over the canonical wire-v1
++//!   DEPOSIT message (docs/BRIDGE_SPEC.md), exactly once per deposit sequence.
++//! - `BurnForWithdrawal` destroys LAT (reducing capitalization) and writes a
++//!   durable receipt with a monotonic burn sequence for guardians to attest.
++//!
++//! Program id = base58(sha256("lattice:program:lattice-bridge:v1")), loaded
++//! from genesis as a builtin behind `enable_lattice_bridge_program`.
++//! Design and account layouts: docs/NATIVE_ISSUANCE.md. Unaudited.
++
++pub mod conversion;
++pub mod error;
++pub mod genesis;
++pub mod guardian;
++pub mod instruction;
++pub mod logic;
++#[cfg(feature = "agave-unstable-api")]
++pub mod processor;
++pub mod state;
++pub mod wire;
++
++#[cfg(test)]
++mod tests;
++
++use solana_pubkey::Pubkey;
++
++pub const ID: Pubkey = Pubkey::from_str_const("Geuc2RbbzoWXSNYRyVDcjM5fZx6raKgf45y1bQr6aSzN");
++
++pub fn id() -> Pubkey {
++    ID
++}
++
++pub fn check_id(id: &Pubkey) -> bool {
++    *id == ID
++}
++
++#[cfg(all(test, feature = "agave-unstable-api"))]
++#[test]
++fn program_id_matches_runtime_supply_gate() {
++    assert_eq!(ID, solana_transaction_context::LATTICE_BRIDGE_PROGRAM_ID);
++}
+diff --git a/programs/lattice-bridge/src/logic.rs b/programs/lattice-bridge/src/logic.rs
+new file mode 100644
+index 000000000..601ad516d
+--- /dev/null
++++ b/programs/lattice-bridge/src/logic.rs
+@@ -0,0 +1,409 @@
++//! Pure state transitions. The builtin processor loads accounts, calls these
++//! functions, and then performs the account side effects (PDA creation,
++//! lamport credit/debit, supply recording). Unit tests drive the same
++//! functions, so every rule below is exercised without a validator.
++
++use crate::{
++    conversion,
++    error::{BridgeError, BridgeResult},
++    guardian,
++    state::{
++        ATTESTATION_SEALED, AttestationHeader, BridgeState, BurnReceipt, FLAG_DEPOSITS_PAUSED,
++        FLAG_LATTICE_GENESIS_BOUND, FLAG_WITHDRAWALS_PAUSED, GuardianSet, MintRecord,
++    },
++    wire::{self, GovernanceAction, Header, KIND_DEPOSIT, KIND_DESTINATION_GOVERNANCE},
++};
++
++/// SHA-256 cost charged when an attestation is sealed (mirrors the
++/// `sol_sha256` syscall pricing: 85 base + 1 CU per 2 bytes).
++pub fn digest_cost(message_len: usize) -> u64 {
++    85u64.saturating_add((message_len as u64).div_ceil(2))
++}
++
++fn ensure(condition: bool, error: BridgeError) -> BridgeResult<()> {
++    if condition { Ok(()) } else { Err(error) }
++}
++
++/// Checks the header fields every kind shares with the bound configuration.
++fn check_common_header(
++    header: &Header,
++    state: &BridgeState,
++    set: &GuardianSet,
++) -> BridgeResult<()> {
++    ensure(
++        header.protocol_version == wire::PROTOCOL_VERSION,
++        BridgeError::WrongProtocolVersion,
++    )?;
++    ensure(header.scheme == set.scheme, BridgeError::WrongScheme)?;
++    ensure(
++        header.deployment_id == state.deployment_id,
++        BridgeError::WrongDeployment,
++    )?;
++    ensure(
++        header.solana_genesis_hash == state.solana_genesis_hash,
++        BridgeError::WrongSolanaGenesis,
++    )?;
++    ensure(
++        header.source_program_id == state.source_program_id,
++        BridgeError::WrongSourceProgram,
++    )?;
++    ensure(
++        header.source_mint == state.source_mint,
++        BridgeError::WrongSourceMint,
++    )?;
++    ensure(
++        header.signer_epoch == state.guardian_epoch && header.signer_epoch == set.epoch,
++        BridgeError::WrongSignerEpoch,
++    )
++}
++
++fn check_set_is_current(state: &BridgeState, set: &GuardianSet) -> BridgeResult<()> {
++    ensure(
++        set.deployment_id == state.deployment_id && set.epoch == state.guardian_epoch,
++        BridgeError::InvalidGuardianSetAccount,
++    )
++}
++
++/// Seals the attestation on first use (fixing its digest and signer epoch)
++/// and verifies signature entries `[first, first + count)`.
++pub fn seal_and_verify<E, F>(
++    attestation: &mut AttestationHeader,
++    account_data: &[u8],
++    state: &BridgeState,
++    set: &GuardianSet,
++    first: u8,
++    count: u8,
++    charge: &mut F,
++) -> Result<(), E>
++where
++    E: From<BridgeError>,
++    F: FnMut(u64) -> Result<(), E>,
++{
++    if attestation.status != ATTESTATION_SEALED {
++        let message = attestation.message(account_data)?;
++        let header = wire::parse_header(message)?;
++        ensure(
++            header.kind == KIND_DEPOSIT || header.kind == KIND_DESTINATION_GOVERNANCE,
++            BridgeError::WrongKind,
++        )?;
++        ensure(
++            header.scheme == attestation.scheme,
++            BridgeError::WrongScheme,
++        )?;
++        ensure(
++            header.deployment_id == state.deployment_id,
++            BridgeError::WrongDeployment,
++        )?;
++        charge(digest_cost(message.len()))?;
++        attestation.digest = wire::digest(message);
++        attestation.signer_epoch = header.signer_epoch;
++        attestation.status = ATTESTATION_SEALED;
++    }
++    ensure(
++        attestation.signer_epoch == state.guardian_epoch,
++        BridgeError::WrongSignerEpoch,
++    )?;
++    check_set_is_current(state, set)?;
++    ensure(set.scheme == attestation.scheme, BridgeError::WrongScheme)?;
++    ensure(
++        u16::from(first).saturating_add(u16::from(count)) <= u16::from(attestation.signature_count),
++        BridgeError::AttestationOutOfBounds,
++    )?;
++    let signatures = attestation.signatures(account_data)?;
++    let proven = guardian::verify_entries(
++        set,
++        &attestation.digest,
++        signatures,
++        usize::from(first),
++        usize::from(count),
++        charge,
++    )?;
++    attestation.verified_bitmap |= proven;
++    Ok(())
++}
++
++/// Preconditions for consuming a sealed attestation in Mint/Govern.
++pub fn check_attestation_ready(
++    attestation: &AttestationHeader,
++    state: &BridgeState,
++    set: &GuardianSet,
++    payer: &[u8; 32],
++) -> BridgeResult<()> {
++    ensure(
++        attestation.status == ATTESTATION_SEALED,
++        BridgeError::AttestationNotSealed,
++    )?;
++    ensure(attestation.writer == *payer, BridgeError::AttestationWriter)?;
++    ensure(
++        attestation.signer_epoch == state.guardian_epoch,
++        BridgeError::WrongSignerEpoch,
++    )?;
++    check_set_is_current(state, set)?;
++    ensure(set.scheme == attestation.scheme, BridgeError::WrongScheme)?;
++    ensure(
++        guardian::signers(attestation.verified_bitmap, set.keys.len()) >= u32::from(set.threshold),
++        BridgeError::BelowThreshold,
++    )
++}
++
++/// Validates a DEPOSIT message (BRIDGE_SPEC §9.1 steps 1 and 3).
++pub fn check_deposit(
++    state: &BridgeState,
++    set: &GuardianSet,
++    message: &[u8],
++) -> BridgeResult<wire::Transfer> {
++    let transfer = wire::parse_transfer(message)?;
++    let header = &transfer.header;
++    ensure(header.kind == KIND_DEPOSIT, BridgeError::WrongKind)?;
++    check_common_header(header, state, set)?;
++    ensure(
++        state.is_flag(FLAG_LATTICE_GENESIS_BOUND),
++        BridgeError::LatticeGenesisNotBound,
++    )?;
++    ensure(
++        header.lattice_genesis_hash == state.lattice_genesis_hash,
++        BridgeError::WrongLatticeGenesis,
++    )?;
++    ensure(
++        transfer.event_id == wire::deposit_event_id(&state.deployment_id, header.nonce),
++        BridgeError::WrongEventId,
++    )?;
++    ensure(transfer.recipient != [0; 32], BridgeError::ZeroRecipient)?;
++    ensure(
++        transfer.source_amount != 0 && transfer.native_amount != 0,
++        BridgeError::ZeroAmount,
++    )?;
++    ensure(
++        conversion::source_to_native(transfer.source_amount, state.source_decimals)?
++            == transfer.native_amount,
++        BridgeError::AmountMismatch,
++    )?;
++    ensure(
++        !state.is_flag(FLAG_DEPOSITS_PAUSED),
++        BridgeError::DepositsPaused,
++    )?;
++    Ok(transfer)
++}
++
++/// Applies supply accounting and the per-epoch mint rate limit.
++pub fn apply_mint(
++    state: &mut BridgeState,
++    native_amount: u64,
++    epoch: u64,
++    slot: u64,
++) -> BridgeResult<()> {
++    if state.rate_limit_epoch != epoch {
++        state.rate_limit_epoch = epoch;
++        state.minted_in_rate_epoch = 0;
++    }
++    let minted_in_epoch = state
++        .minted_in_rate_epoch
++        .checked_add(native_amount)
++        .ok_or(BridgeError::Overflow)?;
++    ensure(
++        minted_in_epoch <= state.max_mint_per_epoch,
++        BridgeError::MintRateLimitExceeded,
++    )?;
++    let native = u128::from(native_amount);
++    state.total_minted_native = state
++        .total_minted_native
++        .checked_add(native)
++        .ok_or(BridgeError::Overflow)?;
++    state.outstanding_native = state
++        .outstanding_native
++        .checked_add(native)
++        .ok_or(BridgeError::Overflow)?;
++    state.minted_count = state
++        .minted_count
++        .checked_add(1)
++        .ok_or(BridgeError::Overflow)?;
++    state.minted_in_rate_epoch = minted_in_epoch;
++    state.last_mint_slot = slot;
++    Ok(())
++}
++
++/// Full mint decision: attestation readiness, message validity,
++/// exactly-once, rate limit and accounting. On success the caller must
++/// create the mint record, credit `native_amount` to the recipient and
++/// record the same supply increase, all in the same instruction.
++#[allow(clippy::too_many_arguments)]
++pub fn process_mint(
++    state: &mut BridgeState,
++    set: &GuardianSet,
++    attestation: &AttestationHeader,
++    message: &[u8],
++    payer: &[u8; 32],
++    mint_record_exists: bool,
++    epoch: u64,
++    slot: u64,
++) -> BridgeResult<MintRecord> {
++    check_attestation_ready(attestation, state, set, payer)?;
++    let transfer = check_deposit(state, set, message)?;
++    ensure(!mint_record_exists, BridgeError::DepositAlreadyMinted)?;
++    apply_mint(state, transfer.native_amount, epoch, slot)?;
++    Ok(MintRecord {
++        deployment_id: state.deployment_id,
++        deposit_sequence: transfer.header.nonce,
++        recipient: transfer.recipient,
++        native_amount: transfer.native_amount,
++        slot,
++        event_id: transfer.event_id,
++    })
++}
++
++/// Burn decision. On success the caller must move `native_amount` from the
++/// burner into program custody, debit it, record the supply decrease and
++/// write the returned receipt, all in the same instruction.
++pub fn process_burn(
++    state: &mut BridgeState,
++    burner: &[u8; 32],
++    native_amount: u64,
++    solana_recipient: &[u8; 32],
++    slot: u64,
++) -> BridgeResult<BurnReceipt> {
++    ensure(
++        !state.is_flag(FLAG_WITHDRAWALS_PAUSED),
++        BridgeError::WithdrawalsPaused,
++    )?;
++    ensure(
++        state.is_flag(FLAG_LATTICE_GENESIS_BOUND),
++        BridgeError::LatticeGenesisNotBound,
++    )?;
++    ensure(*solana_recipient != [0; 32], BridgeError::ZeroRecipient)?;
++    let source_amount = conversion::native_to_source(native_amount, state.source_decimals)?;
++    let native = u128::from(native_amount);
++    let outstanding = state
++        .outstanding_native
++        .checked_sub(native)
++        .ok_or(BridgeError::BurnExceedsOutstanding)?;
++    let burn_sequence = state.next_burn_sequence;
++    state.next_burn_sequence = burn_sequence.checked_add(1).ok_or(BridgeError::Overflow)?;
++    state.total_burned_native = state
++        .total_burned_native
++        .checked_add(native)
++        .ok_or(BridgeError::Overflow)?;
++    state.outstanding_native = outstanding;
++    state.last_burn_slot = slot;
++    Ok(BurnReceipt {
++        deployment_id: state.deployment_id,
++        burn_sequence,
++        burner: *burner,
++        native_amount,
++        source_amount,
++        solana_recipient: *solana_recipient,
++        slot,
++        event_id: wire::burn_event_id(&state.deployment_id, burn_sequence),
++    })
++}
++
++/// Validates and applies a DESTINATION_GOVERNANCE (kind 4) message. Returns
++/// the new guardian set when the action is a rotation; the caller must then
++/// create its account at `PDA(["guardian-set", deployment_id, new_epoch])`.
++pub fn process_governance(
++    state: &mut BridgeState,
++    set: &GuardianSet,
++    attestation: &AttestationHeader,
++    message: &[u8],
++    payer: &[u8; 32],
++    slot: u64,
++) -> BridgeResult<Option<GuardianSet>> {
++    check_attestation_ready(attestation, state, set, payer)?;
++    let header = wire::parse_header(message)?;
++    ensure(
++        header.kind == KIND_DESTINATION_GOVERNANCE,
++        BridgeError::WrongKind,
++    )?;
++    check_common_header(&header, state, set)?;
++    ensure(
++        header.nonce == state.governance_sequence,
++        BridgeError::WrongNonce,
++    )?;
++    let body = message
++        .get(wire::HEADER_LEN..)
++        .ok_or(BridgeError::MalformedMessage)?;
++    let action = wire::parse_governance_body(body)?;
++    let bound = state.is_flag(FLAG_LATTICE_GENESIS_BOUND);
++    if action == GovernanceAction::BindLatticeGenesis {
++        ensure(!bound, BridgeError::LatticeGenesisAlreadyBound)?;
++        ensure(
++            header.lattice_genesis_hash != [0; 32],
++            BridgeError::WrongLatticeGenesis,
++        )?;
++    } else {
++        // Before binding, governance messages carry the all-zero hash.
++        ensure(
++            header.lattice_genesis_hash == state.lattice_genesis_hash,
++            BridgeError::WrongLatticeGenesis,
++        )?;
++    }
++    state.governance_sequence = state
++        .governance_sequence
++        .checked_add(1)
++        .ok_or(BridgeError::Overflow)?;
++    let mut new_set = None;
++    match action {
++        GovernanceAction::RotateGuardians {
++            new_epoch,
++            threshold,
++            scheme,
++            keys,
++        } => {
++            ensure(
++                Some(new_epoch) == state.guardian_epoch.checked_add(1),
++                BridgeError::WrongNewEpoch,
++            )?;
++            let candidate = GuardianSet {
++                scheme,
++                threshold,
++                bump: 0,
++                epoch: new_epoch,
++                created_slot: slot,
++                deployment_id: state.deployment_id,
++                keys,
++            };
++            candidate.validate()?;
++            state.guardian_epoch = new_epoch;
++            new_set = Some(candidate);
++        }
++        GovernanceAction::SetPause {
++            deposits_paused,
++            withdrawals_paused,
++        } => {
++            state.set_flag(FLAG_DEPOSITS_PAUSED, deposits_paused);
++            state.set_flag(FLAG_WITHDRAWALS_PAUSED, withdrawals_paused);
++        }
++        GovernanceAction::SetLimits { max_mint_per_epoch } => {
++            state.max_mint_per_epoch = max_mint_per_epoch;
++        }
++        GovernanceAction::SetPauser { pauser } => state.pauser = pauser,
++        GovernanceAction::BindLatticeGenesis => {
++            state.lattice_genesis_hash = header.lattice_genesis_hash;
++            state.set_flag(FLAG_LATTICE_GENESIS_BOUND, true);
++        }
++    }
++    Ok(new_set)
++}
++
++/// The optional pauser key can only set pause flags (1 = pause, 0 = leave).
++pub fn process_pauser_pause(
++    state: &mut BridgeState,
++    signer: &[u8; 32],
++    pause_deposits: u8,
++    pause_withdrawals: u8,
++) -> BridgeResult<()> {
++    ensure(
++        state.pauser != [0; 32] && state.pauser == *signer,
++        BridgeError::NotPauser,
++    )?;
++    for (flag, value) in [
++        (FLAG_DEPOSITS_PAUSED, pause_deposits),
++        (FLAG_WITHDRAWALS_PAUSED, pause_withdrawals),
++    ] {
++        match value {
++            0 => {}
++            1 => state.set_flag(flag, true),
++            _ => return Err(BridgeError::UnpauseNotAllowed),
++        }
++    }
++    Ok(())
++}
+diff --git a/programs/lattice-bridge/src/processor.rs b/programs/lattice-bridge/src/processor.rs
+new file mode 100644
+index 000000000..3432adba2
+--- /dev/null
++++ b/programs/lattice-bridge/src/processor.rs
+@@ -0,0 +1,603 @@
++//! Builtin entrypoint. Loads accounts, runs the pure decisions in
++//! [`crate::logic`], then applies side effects atomically within the same
++//! top-level instruction:
++//!
++//! - mint: create the `LATMINT1` record PDA, credit the recipient, and call
++//!   `TransactionContext::record_native_supply_change(+amount)`;
++//! - burn: create the `LATBURN1` receipt PDA, move `amount` from the burner
++//!   into the program-owned state account via the system program, debit it
++//!   there, and call `record_native_supply_change(-amount)`.
++//!
++//! The runtime applies the recorded delta to bank capitalization only if the
++//! whole transaction succeeds.
++
++use {
++    crate::{
++        error::BridgeError,
++        instruction::BridgeInstruction,
++        logic,
++        state::{
++            ATTESTATION_HEADER_LEN, ATTESTATION_OPEN, AttestationHeader, BURN_RECEIPT_LEN,
++            BridgeState, GuardianSet, MINT_RECORD_LEN, SEED_BURN, SEED_GUARDIAN_SET, SEED_MINTED,
++            SEED_STATE,
++        },
++        wire,
++    },
++    solana_instruction::error::InstructionError,
++    solana_program_runtime::{declare_process_instruction, invoke_context::InvokeContext},
++    solana_pubkey::Pubkey,
++    solana_svm_log_collector::ic_msg,
++    solana_system_interface::instruction as system_instruction,
++    solana_transaction_context::IndexOfAccount,
++};
++
++pub const DEFAULT_COMPUTE_UNITS: u64 = 1_500;
++/// Same price as one `create_program_address` syscall attempt.
++pub const PDA_DERIVATION_COST: u64 = 1_500;
++/// Charge for copying data into an attestation account.
++pub const WRITE_BYTES_PER_CU: u64 = 16;
++
++impl From<BridgeError> for InstructionError {
++    fn from(error: BridgeError) -> Self {
++        InstructionError::Custom(error.into())
++    }
++}
++
++declare_process_instruction!(Entrypoint, DEFAULT_COMPUTE_UNITS, |invoke_context| {
++    let result = process(invoke_context);
++    if let Err(err) = &result {
++        ic_msg!(invoke_context, "lattice-bridge: {:?}", err);
++    }
++    result
++});
++
++fn process(invoke_context: &mut InvokeContext) -> Result<(), InstructionError> {
++    let data = invoke_context
++        .transaction_context
++        .get_current_instruction_context()?
++        .get_instruction_data()
++        .to_vec();
++    match BridgeInstruction::decode(&data)? {
++        BridgeInstruction::InitAttestation {
++            scheme,
++            signature_count,
++            message_len,
++        } => init_attestation(invoke_context, scheme, signature_count, message_len),
++        BridgeInstruction::WriteAttestation { offset, data } => {
++            write_attestation(invoke_context, offset, &data)
++        }
++        BridgeInstruction::VerifyAttestation { first, count } => {
++            verify_attestation(invoke_context, first, count)
++        }
++        BridgeInstruction::CloseAttestation => close_attestation_instruction(invoke_context),
++        BridgeInstruction::MintFromDeposit => mint_from_deposit(invoke_context),
++        BridgeInstruction::BurnForWithdrawal {
++            native_amount,
++            solana_recipient,
++        } => burn_for_withdrawal(invoke_context, native_amount, &solana_recipient),
++        BridgeInstruction::Govern => govern(invoke_context),
++        BridgeInstruction::Pause {
++            deposits,
++            withdrawals,
++        } => pause(invoke_context, deposits, withdrawals),
++    }
++}
++
++fn charge(invoke_context: &InvokeContext, units: u64) -> Result<(), InstructionError> {
++    invoke_context
++        .compute_meter
++        .consume_checked(units)
++        .map_err(|_| InstructionError::ComputationalBudgetExceeded)
++}
++
++fn key_at(
++    invoke_context: &InvokeContext,
++    index: IndexOfAccount,
++) -> Result<Pubkey, InstructionError> {
++    Ok(*invoke_context
++        .transaction_context
++        .get_current_instruction_context()?
++        .get_key_of_instruction_account(index)?)
++}
++
++fn require_signer(
++    invoke_context: &InvokeContext,
++    index: IndexOfAccount,
++) -> Result<Pubkey, InstructionError> {
++    let instruction_context = invoke_context
++        .transaction_context
++        .get_current_instruction_context()?;
++    if !instruction_context.is_instruction_account_signer(index)? {
++        return Err(InstructionError::MissingRequiredSignature);
++    }
++    Ok(*instruction_context.get_key_of_instruction_account(index)?)
++}
++
++fn require_accounts(
++    invoke_context: &InvokeContext,
++    count: IndexOfAccount,
++) -> Result<(), InstructionError> {
++    invoke_context
++        .transaction_context
++        .get_current_instruction_context()?
++        .check_number_of_instruction_accounts(count)
++}
++
++fn require_system_program(
++    invoke_context: &InvokeContext,
++    index: IndexOfAccount,
++) -> Result<(), InstructionError> {
++    if key_at(invoke_context, index)? != solana_sdk_ids::system_program::id() {
++        return Err(InstructionError::MissingAccount);
++    }
++    Ok(())
++}
++
++/// Returns (owner, lamports, data) of an instruction account.
++fn read_account(
++    invoke_context: &InvokeContext,
++    index: IndexOfAccount,
++) -> Result<(Pubkey, u64, Vec<u8>), InstructionError> {
++    let instruction_context = invoke_context
++        .transaction_context
++        .get_current_instruction_context()?;
++    let account = instruction_context.try_borrow_instruction_account(index)?;
++    Ok((
++        *account.get_owner(),
++        account.get_lamports(),
++        account.get_data().to_vec(),
++    ))
++}
++
++fn write_data(
++    invoke_context: &InvokeContext,
++    index: IndexOfAccount,
++    data: &[u8],
++) -> Result<(), InstructionError> {
++    let instruction_context = invoke_context
++        .transaction_context
++        .get_current_instruction_context()?;
++    let mut account = instruction_context.try_borrow_instruction_account(index)?;
++    let target = account.get_data_mut()?;
++    if target.len() != data.len() {
++        return Err(InstructionError::InvalidAccountData);
++    }
++    target.copy_from_slice(data);
++    Ok(())
++}
++
++fn find_pda(
++    invoke_context: &InvokeContext,
++    seeds: &[&[u8]],
++) -> Result<(Pubkey, u8), InstructionError> {
++    let (address, bump) = Pubkey::find_program_address(seeds, &crate::id());
++    charge(
++        invoke_context,
++        PDA_DERIVATION_COST.saturating_mul(256u64.saturating_sub(u64::from(bump))),
++    )?;
++    Ok((address, bump))
++}
++
++fn load_state(
++    invoke_context: &InvokeContext,
++    index: IndexOfAccount,
++) -> Result<(Pubkey, BridgeState), InstructionError> {
++    let (owner, _, data) = read_account(invoke_context, index)?;
++    if owner != crate::id() {
++        return Err(BridgeError::InvalidStateAccount.into());
++    }
++    let state = BridgeState::decode(&data)?;
++    charge(invoke_context, PDA_DERIVATION_COST)?;
++    let expected = Pubkey::create_program_address(
++        &[SEED_STATE, &state.deployment_id, &[state.bump]],
++        &crate::id(),
++    )
++    .map_err(|_| BridgeError::InvalidStateAccount)?;
++    let key = key_at(invoke_context, index)?;
++    if key != expected {
++        return Err(BridgeError::InvalidStateAccount.into());
++    }
++    Ok((key, state))
++}
++
++fn load_guardian_set(
++    invoke_context: &InvokeContext,
++    index: IndexOfAccount,
++) -> Result<GuardianSet, InstructionError> {
++    let (owner, _, data) = read_account(invoke_context, index)?;
++    if owner != crate::id() {
++        return Err(BridgeError::InvalidGuardianSetAccount.into());
++    }
++    Ok(GuardianSet::decode(&data)?)
++}
++
++fn load_attestation(
++    invoke_context: &InvokeContext,
++    index: IndexOfAccount,
++) -> Result<(AttestationHeader, Vec<u8>), InstructionError> {
++    let (owner, _, data) = read_account(invoke_context, index)?;
++    if owner != crate::id() {
++        return Err(BridgeError::InvalidAttestationAccount.into());
++    }
++    let header = AttestationHeader::decode(&data)?;
++    Ok((header, data))
++}
++
++/// Creates a program-owned PDA funded by `payer`. Handles an address that was
++/// pre-funded by a third party (transfer + allocate + assign instead of
++/// create_account), so lamports sent to a future record address cannot
++/// block it.
++fn create_pda_account(
++    invoke_context: &mut InvokeContext,
++    payer_index: IndexOfAccount,
++    pda_index: IndexOfAccount,
++    seeds: &[&[u8]],
++    space: usize,
++) -> Result<(), InstructionError> {
++    let payer = key_at(invoke_context, payer_index)?;
++    let pda = key_at(invoke_context, pda_index)?;
++    let (owner, lamports, data) = read_account(invoke_context, pda_index)?;
++    let required = invoke_context
++        .environment_config
++        .sysvar_cache()
++        .get_rent()?
++        .minimum_balance(space)
++        .max(1);
++    let program_id = crate::id();
++    let space = space as u64;
++    if lamports == 0 {
++        invoke_context.native_invoke_signed(
++            system_instruction::create_account(&payer, &pda, required, space, &program_id),
++            &[seeds],
++        )?;
++    } else {
++        if owner != solana_sdk_ids::system_program::id() || !data.is_empty() {
++            return Err(InstructionError::AccountAlreadyInitialized);
++        }
++        if lamports < required {
++            invoke_context.native_invoke_signed(
++                system_instruction::transfer(&payer, &pda, required.saturating_sub(lamports)),
++                &[],
++            )?;
++        }
++        invoke_context.native_invoke_signed(system_instruction::allocate(&pda, space), &[seeds])?;
++        invoke_context
++            .native_invoke_signed(system_instruction::assign(&pda, &program_id), &[seeds])?;
++    }
++    Ok(())
++}
++
++/// Returns all attestation lamports to `refund_index` and empties the account.
++fn close_attestation(
++    invoke_context: &InvokeContext,
++    attestation_index: IndexOfAccount,
++    refund_index: IndexOfAccount,
++) -> Result<(), InstructionError> {
++    let instruction_context = invoke_context
++        .transaction_context
++        .get_current_instruction_context()?;
++    let lamports = {
++        let mut attestation =
++            instruction_context.try_borrow_instruction_account(attestation_index)?;
++        let lamports = attestation.get_lamports();
++        attestation.set_data_length(0)?;
++        attestation.set_lamports(0)?;
++        lamports
++    };
++    instruction_context
++        .try_borrow_instruction_account(refund_index)?
++        .checked_add_lamports(lamports)
++}
++
++fn init_attestation(
++    invoke_context: &mut InvokeContext,
++    scheme: u8,
++    signature_count: u8,
++    message_len: u32,
++) -> Result<(), InstructionError> {
++    require_accounts(invoke_context, 2)?;
++    let writer = require_signer(invoke_context, 0)?;
++    if signature_count == 0
++        || usize::from(signature_count) > wire::MAX_GUARDIANS
++        || (message_len as usize) < wire::HEADER_LEN
++        || (message_len as usize) > wire::MAX_MESSAGE_LEN
++    {
++        return Err(BridgeError::AttestationOutOfBounds.into());
++    }
++    let total_len = AttestationHeader::total_len(scheme, message_len, signature_count)?;
++    let instruction_context = invoke_context
++        .transaction_context
++        .get_current_instruction_context()?;
++    let mut attestation = instruction_context.try_borrow_instruction_account(1)?;
++    if *attestation.get_owner() != crate::id() {
++        return Err(BridgeError::InvalidAttestationAccount.into());
++    }
++    if attestation.get_data().len() != total_len {
++        return Err(BridgeError::InvalidAttestationAccount.into());
++    }
++    if attestation
++        .get_data()
++        .iter()
++        .take(ATTESTATION_HEADER_LEN)
++        .any(|b| *b != 0)
++    {
++        return Err(InstructionError::AccountAlreadyInitialized);
++    }
++    let header = AttestationHeader {
++        scheme,
++        status: ATTESTATION_OPEN,
++        signature_count,
++        verified_bitmap: 0,
++        signer_epoch: 0,
++        digest: [0; 32],
++        writer: writer.to_bytes(),
++        message_len,
++    };
++    header.encode_into(attestation.get_data_mut()?);
++    Ok(())
++}
++
++fn write_attestation(
++    invoke_context: &mut InvokeContext,
++    offset: u32,
++    bytes: &[u8],
++) -> Result<(), InstructionError> {
++    require_accounts(invoke_context, 2)?;
++    let writer = require_signer(invoke_context, 0)?;
++    charge(
++        invoke_context,
++        (bytes.len() as u64).div_ceil(WRITE_BYTES_PER_CU),
++    )?;
++    let (header, data) = load_attestation(invoke_context, 1)?;
++    if header.status != ATTESTATION_OPEN {
++        return Err(BridgeError::AttestationSealed.into());
++    }
++    if header.writer != writer.to_bytes() {
++        return Err(BridgeError::AttestationWriter.into());
++    }
++    let start = ATTESTATION_HEADER_LEN
++        .checked_add(offset as usize)
++        .ok_or(BridgeError::AttestationOutOfBounds)?;
++    let end = start
++        .checked_add(bytes.len())
++        .filter(|end| *end <= data.len())
++        .ok_or(BridgeError::AttestationOutOfBounds)?;
++    let instruction_context = invoke_context
++        .transaction_context
++        .get_current_instruction_context()?;
++    let mut attestation = instruction_context.try_borrow_instruction_account(1)?;
++    attestation
++        .get_data_mut()?
++        .get_mut(start..end)
++        .ok_or(BridgeError::AttestationOutOfBounds)?
++        .copy_from_slice(bytes);
++    Ok(())
++}
++
++fn verify_attestation(
++    invoke_context: &mut InvokeContext,
++    first: u8,
++    count: u8,
++) -> Result<(), InstructionError> {
++    require_accounts(invoke_context, 3)?;
++    let (_, state) = load_state(invoke_context, 1)?;
++    let set = load_guardian_set(invoke_context, 2)?;
++    let (mut header, data) = load_attestation(invoke_context, 0)?;
++    let mut meter = |units: u64| charge(invoke_context, units);
++    logic::seal_and_verify(&mut header, &data, &state, &set, first, count, &mut meter)?;
++    let mut updated = data;
++    header.encode_into(&mut updated);
++    write_data(invoke_context, 0, &updated)
++}
++
++fn close_attestation_instruction(
++    invoke_context: &mut InvokeContext,
++) -> Result<(), InstructionError> {
++    require_accounts(invoke_context, 2)?;
++    let writer = require_signer(invoke_context, 0)?;
++    let (header, _) = load_attestation(invoke_context, 1)?;
++    if header.writer != writer.to_bytes() {
++        return Err(BridgeError::AttestationWriter.into());
++    }
++    close_attestation(invoke_context, 1, 0)
++}
++
++fn current_clock(invoke_context: &InvokeContext) -> Result<(u64, u64), InstructionError> {
++    let clock = invoke_context
++        .environment_config
++        .sysvar_cache()
++        .get_clock()?;
++    Ok((clock.slot, clock.epoch))
++}
++
++fn mint_from_deposit(invoke_context: &mut InvokeContext) -> Result<(), InstructionError> {
++    const PAYER: IndexOfAccount = 0;
++    const STATE: IndexOfAccount = 1;
++    const GUARDIANS: IndexOfAccount = 2;
++    const ATTESTATION: IndexOfAccount = 3;
++    const RECORD: IndexOfAccount = 4;
++    const RECIPIENT: IndexOfAccount = 5;
++    const SYSTEM: IndexOfAccount = 6;
++
++    require_accounts(invoke_context, 7)?;
++    let payer = require_signer(invoke_context, PAYER)?;
++    require_system_program(invoke_context, SYSTEM)?;
++    let (_, mut state) = load_state(invoke_context, STATE)?;
++    let set = load_guardian_set(invoke_context, GUARDIANS)?;
++    let (attestation, attestation_data) = load_attestation(invoke_context, ATTESTATION)?;
++    let message = attestation.message(&attestation_data)?.to_vec();
++    let transfer = wire::parse_transfer(&message)?;
++    let nonce = transfer.header.nonce.to_le_bytes();
++
++    let (record_address, bump) =
++        find_pda(invoke_context, &[SEED_MINTED, &state.deployment_id, &nonce])?;
++    if key_at(invoke_context, RECORD)? != record_address {
++        return Err(BridgeError::InvalidRecordAccount.into());
++    }
++    let (record_owner, _, _) = read_account(invoke_context, RECORD)?;
++    let (recipient_owner, _, _) = read_account(invoke_context, RECIPIENT)?;
++    if key_at(invoke_context, RECIPIENT)?.to_bytes() != transfer.recipient
++        || recipient_owner == crate::id()
++    {
++        return Err(BridgeError::InvalidRecipientAccount.into());
++    }
++
++    let (slot, epoch) = current_clock(invoke_context)?;
++    let record = logic::process_mint(
++        &mut state,
++        &set,
++        &attestation,
++        &message,
++        &payer.to_bytes(),
++        record_owner == crate::id(),
++        epoch,
++        slot,
++    )?;
++
++    let deployment_id = state.deployment_id;
++    create_pda_account(
++        invoke_context,
++        PAYER,
++        RECORD,
++        &[SEED_MINTED, &deployment_id, &nonce, &[bump]],
++        MINT_RECORD_LEN,
++    )?;
++    write_data(invoke_context, RECORD, &record.encode())?;
++    {
++        let instruction_context = invoke_context
++            .transaction_context
++            .get_current_instruction_context()?;
++        instruction_context
++            .try_borrow_instruction_account(RECIPIENT)?
++            .checked_add_lamports(record.native_amount)?;
++    }
++    invoke_context
++        .transaction_context
++        .record_native_supply_change(i128::from(record.native_amount))?;
++    write_data(invoke_context, STATE, &state.encode())?;
++    close_attestation(invoke_context, ATTESTATION, PAYER)
++}
++
++fn burn_for_withdrawal(
++    invoke_context: &mut InvokeContext,
++    native_amount: u64,
++    solana_recipient: &[u8; 32],
++) -> Result<(), InstructionError> {
++    const BURNER: IndexOfAccount = 0;
++    const STATE: IndexOfAccount = 1;
++    const RECEIPT: IndexOfAccount = 2;
++    const SYSTEM: IndexOfAccount = 3;
++
++    require_accounts(invoke_context, 4)?;
++    let burner = require_signer(invoke_context, BURNER)?;
++    require_system_program(invoke_context, SYSTEM)?;
++    let (state_address, mut state) = load_state(invoke_context, STATE)?;
++    let (slot, _) = current_clock(invoke_context)?;
++    let receipt = logic::process_burn(
++        &mut state,
++        &burner.to_bytes(),
++        native_amount,
++        solana_recipient,
++        slot,
++    )?;
++
++    let deployment_id = state.deployment_id;
++    let sequence = receipt.burn_sequence.to_le_bytes();
++    let (receipt_address, bump) =
++        find_pda(invoke_context, &[SEED_BURN, &deployment_id, &sequence])?;
++    if key_at(invoke_context, RECEIPT)? != receipt_address {
++        return Err(BridgeError::InvalidRecordAccount.into());
++    }
++    if read_account(invoke_context, RECEIPT)?.0 == crate::id() {
++        return Err(BridgeError::InvalidRecordAccount.into());
++    }
++    create_pda_account(
++        invoke_context,
++        BURNER,
++        RECEIPT,
++        &[SEED_BURN, &deployment_id, &sequence, &[bump]],
++        BURN_RECEIPT_LEN,
++    )?;
++    write_data(invoke_context, RECEIPT, &receipt.encode())?;
++
++    // Take custody of the burned lamports, then destroy them.
++    invoke_context.native_invoke_signed(
++        system_instruction::transfer(&burner, &state_address, native_amount),
++        &[],
++    )?;
++    {
++        let instruction_context = invoke_context
++            .transaction_context
++            .get_current_instruction_context()?;
++        instruction_context
++            .try_borrow_instruction_account(STATE)?
++            .checked_sub_lamports(native_amount)?;
++    }
++    invoke_context
++        .transaction_context
++        .record_native_supply_change(i128::from(native_amount).saturating_neg())?;
++    write_data(invoke_context, STATE, &state.encode())
++}
++
++fn govern(invoke_context: &mut InvokeContext) -> Result<(), InstructionError> {
++    const PAYER: IndexOfAccount = 0;
++    const STATE: IndexOfAccount = 1;
++    const GUARDIANS: IndexOfAccount = 2;
++    const ATTESTATION: IndexOfAccount = 3;
++    const SYSTEM: IndexOfAccount = 4;
++    const NEW_GUARDIANS: IndexOfAccount = 5;
++
++    require_accounts(invoke_context, 5)?;
++    let payer = require_signer(invoke_context, PAYER)?;
++    require_system_program(invoke_context, SYSTEM)?;
++    let (_, mut state) = load_state(invoke_context, STATE)?;
++    let set = load_guardian_set(invoke_context, GUARDIANS)?;
++    let (attestation, attestation_data) = load_attestation(invoke_context, ATTESTATION)?;
++    let message = attestation.message(&attestation_data)?.to_vec();
++    let (slot, _) = current_clock(invoke_context)?;
++    let new_set = logic::process_governance(
++        &mut state,
++        &set,
++        &attestation,
++        &message,
++        &payer.to_bytes(),
++        slot,
++    )?;
++    if let Some(mut new_set) = new_set {
++        require_accounts(invoke_context, 6)?;
++        let deployment_id = state.deployment_id;
++        let epoch = new_set.epoch.to_le_bytes();
++        let (address, bump) =
++            find_pda(invoke_context, &[SEED_GUARDIAN_SET, &deployment_id, &epoch])?;
++        if key_at(invoke_context, NEW_GUARDIANS)? != address {
++            return Err(BridgeError::InvalidGuardianSetAccount.into());
++        }
++        new_set.bump = bump;
++        let data = new_set.encode()?;
++        create_pda_account(
++            invoke_context,
++            PAYER,
++            NEW_GUARDIANS,
++            &[SEED_GUARDIAN_SET, &deployment_id, &epoch, &[bump]],
++            data.len(),
++        )?;
++        write_data(invoke_context, NEW_GUARDIANS, &data)?;
++    }
++    write_data(invoke_context, STATE, &state.encode())?;
++    close_attestation(invoke_context, ATTESTATION, PAYER)
++}
++
++fn pause(
++    invoke_context: &mut InvokeContext,
++    deposits: u8,
++    withdrawals: u8,
++) -> Result<(), InstructionError> {
++    require_accounts(invoke_context, 2)?;
++    let pauser = require_signer(invoke_context, 0)?;
++    let (_, mut state) = load_state(invoke_context, 1)?;
++    logic::process_pauser_pause(&mut state, &pauser.to_bytes(), deposits, withdrawals)?;
++    write_data(invoke_context, 1, &state.encode())
++}
++
++#[cfg(all(test, feature = "dev-context-only-utils"))]
++mod tests;
+diff --git a/programs/lattice-bridge/src/processor/tests.rs b/programs/lattice-bridge/src/processor/tests.rs
+new file mode 100644
+index 000000000..91ec0487c
+--- /dev/null
++++ b/programs/lattice-bridge/src/processor/tests.rs
+@@ -0,0 +1,601 @@
++#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
++
++use {
++    super::Entrypoint,
++    crate::{
++        error::BridgeError,
++        instruction::builders,
++        state::{
++            self, AttestationHeader, BridgeState, BurnReceipt, FLAG_LATTICE_GENESIS_BOUND,
++            GuardianSet, MintRecord, NETWORK_MAINNET, STATE_LEN,
++        },
++        wire::{self, GovernanceAction, GuardianKey, Header, Transfer},
++    },
++    ed25519_dalek::Signer as _,
++    solana_account::{AccountSharedData, ReadableAccount},
++    solana_instruction::{Instruction, error::InstructionError},
++    solana_program_runtime::{
++        invoke_context::mock_process_instruction, program_cache_entry::ProgramCacheEntry,
++        solana_sbpf::program::BuiltinFunctionDefinition,
++    },
++    solana_pubkey::Pubkey,
++    solana_sdk_ids::{native_loader, system_program, sysvar},
++    std::{cell::Cell, collections::HashMap, sync::Arc},
++};
++
++const LAMPORTS_PER_BYTE: u64 = 6_960;
++const SLOT: u64 = 1_000;
++const EPOCH: u64 = 3;
++const DECIMALS: u8 = 6;
++const SCALE: u64 = 1_000;
++const SOLANA_GENESIS: [u8; 32] = [0x11; 32];
++const LATTICE_GENESIS: [u8; 32] = [0x22; 32];
++const SOURCE_PROGRAM: [u8; 32] = [0x33; 32];
++const SOURCE_MINT: [u8; 32] = [0x44; 32];
++
++fn account_with(lamports: u64, owner: &Pubkey, data: &[u8]) -> AccountSharedData {
++    let mut account = AccountSharedData::new(lamports, data.len(), owner);
++    account.set_data_from_slice(data);
++    account
++}
++
++fn rent_account() -> AccountSharedData {
++    let mut data = LAMPORTS_PER_BYTE.to_le_bytes().to_vec();
++    data.extend_from_slice(&2.0f64.to_le_bytes());
++    data.push(50);
++    account_with(1, &sysvar::id(), &data)
++}
++
++fn clock_account() -> AccountSharedData {
++    let mut data = Vec::new();
++    for value in [SLOT, 0, EPOCH, EPOCH + 1, 0] {
++        data.extend_from_slice(&value.to_le_bytes());
++    }
++    account_with(1, &sysvar::id(), &data)
++}
++
++fn program_account(data: Vec<u8>) -> AccountSharedData {
++    let lamports = (128 + data.len() as u64) * LAMPORTS_PER_BYTE;
++    account_with(lamports, &crate::id(), &data)
++}
++
++fn bridge_error(error: BridgeError) -> InstructionError {
++    InstructionError::from(error)
++}
++
++struct Env {
++    accounts: HashMap<Pubkey, AccountSharedData>,
++    deployment_id: [u8; 32],
++    guardians: Vec<ed25519_dalek::SigningKey>,
++    epoch: u64,
++    payer: Pubkey,
++}
++
++impl Env {
++    fn new() -> Self {
++        let deployment_id = wire::deployment_id(b"processor-test");
++        let guardians: Vec<_> = (1..=3u8)
++            .map(|seed| ed25519_dalek::SigningKey::from_bytes(&[seed; 32]))
++            .collect();
++        let program_id = crate::id();
++        let (set_address, set_bump) = state::guardian_set_address(&program_id, &deployment_id, 1);
++        let set = GuardianSet {
++            scheme: wire::SCHEME_ED25519,
++            threshold: 2,
++            bump: set_bump,
++            epoch: 1,
++            created_slot: 0,
++            deployment_id,
++            keys: guardians
++                .iter()
++                .map(|key| GuardianKey {
++                    ed25519: Some(key.verifying_key().to_bytes()),
++                    mldsa65: None,
++                })
++                .collect(),
++        };
++        let (state_address, state_bump) = state::state_address(&program_id, &deployment_id);
++        let mut bridge_state = BridgeState {
++            deployment_id,
++            guardian_epoch: 1,
++            bump: state_bump,
++            source_decimals: DECIMALS,
++            network: NETWORK_MAINNET,
++            solana_genesis_hash: SOLANA_GENESIS,
++            lattice_genesis_hash: LATTICE_GENESIS,
++            source_program_id: SOURCE_PROGRAM,
++            source_mint: SOURCE_MINT,
++            pauser: Pubkey::new_from_array([0x77; 32]).to_bytes(),
++            max_mint_per_epoch: u64::MAX,
++            ..BridgeState::default()
++        };
++        bridge_state.set_flag(FLAG_LATTICE_GENESIS_BOUND, true);
++        let payer = Pubkey::new_unique();
++        let mut accounts = HashMap::new();
++        accounts.insert(
++            payer,
++            AccountSharedData::new(100_000_000_000, 0, &system_program::id()),
++        );
++        accounts.insert(state_address, program_account(bridge_state.encode()));
++        accounts.insert(set_address, program_account(set.encode().unwrap()));
++        Self {
++            accounts,
++            deployment_id,
++            guardians,
++            epoch: 1,
++            payer,
++        }
++    }
++
++    fn state(&self) -> BridgeState {
++        let address = state::state_address(&crate::id(), &self.deployment_id).0;
++        BridgeState::decode(self.accounts[&address].data()).unwrap()
++    }
++
++    fn lamports(&self, key: &Pubkey) -> u64 {
++        self.accounts.get(key).map(|a| a.lamports()).unwrap_or(0)
++    }
++
++    fn total_lamports(&self) -> u128 {
++        self.accounts
++            .values()
++            .map(|a| u128::from(a.lamports()))
++            .sum()
++    }
++
++    /// Runs one top-level instruction. Accounts are written back only on
++    /// success (a failed instruction fails the transaction). Returns the
++    /// native supply delta the instruction recorded.
++    fn run(&mut self, instruction: Instruction, expected: Result<(), InstructionError>) -> i128 {
++        let mut keys: Vec<Pubkey> = Vec::new();
++        for meta in &instruction.accounts {
++            if !keys.contains(&meta.pubkey) {
++                keys.push(meta.pubkey);
++            }
++        }
++        let mut accounts: Vec<(Pubkey, AccountSharedData)> = keys
++            .iter()
++            .map(|key| {
++                let account = if *key == system_program::id() {
++                    AccountSharedData::new(0, 0, &native_loader::id())
++                } else {
++                    self.accounts.get(key).cloned().unwrap_or_default()
++                };
++                (*key, account)
++            })
++            .collect();
++        accounts.push((sysvar::rent::id(), rent_account()));
++        accounts.push((sysvar::clock::id(), clock_account()));
++        let delta = Cell::new(0i128);
++        let succeeded = expected.is_ok();
++        let results = mock_process_instruction(
++            &crate::id(),
++            &instruction.data,
++            accounts,
++            instruction.accounts.clone(),
++            expected,
++            Entrypoint::register,
++            |invoke_context| {
++                invoke_context.program_cache_for_tx_batch.replenish(
++                    system_program::id(),
++                    Arc::new(ProgramCacheEntry::new_builtin(
++                        0,
++                        solana_system_program::system_processor::Entrypoint::register,
++                    )),
++                );
++            },
++            |invoke_context| delta.set(invoke_context.transaction_context.native_supply_delta()),
++        );
++        if succeeded {
++            for (key, account) in keys.iter().zip(results) {
++                if *key != system_program::id() {
++                    self.accounts.insert(*key, account);
++                }
++            }
++        }
++        delta.get()
++    }
++
++    fn header(&self, kind: u8, nonce: u64) -> Header {
++        Header {
++            kind,
++            protocol_version: wire::PROTOCOL_VERSION,
++            scheme: wire::SCHEME_ED25519,
++            deployment_id: self.deployment_id,
++            solana_genesis_hash: SOLANA_GENESIS,
++            lattice_genesis_hash: LATTICE_GENESIS,
++            source_program_id: SOURCE_PROGRAM,
++            source_mint: SOURCE_MINT,
++            signer_epoch: self.epoch,
++            nonce,
++        }
++    }
++
++    fn deposit_message(&self, sequence: u64, source_amount: u64, recipient: &Pubkey) -> Vec<u8> {
++        wire::encode_transfer(&Transfer {
++            header: self.header(wire::KIND_DEPOSIT, sequence),
++            source_amount,
++            native_amount: source_amount * SCALE,
++            recipient: recipient.to_bytes(),
++            event_id: wire::deposit_event_id(&self.deployment_id, sequence),
++        })
++    }
++
++    /// Creates, fills and verifies an attestation through the builtin.
++    fn attest(
++        &mut self,
++        message: &[u8],
++        signers: &[u8],
++        guardians: &[ed25519_dalek::SigningKey],
++    ) -> Pubkey {
++        let attestation = Pubkey::new_unique();
++        let count = signers.len() as u8;
++        let len = AttestationHeader::total_len(wire::SCHEME_ED25519, message.len() as u32, count)
++            .unwrap();
++        self.accounts
++            .insert(attestation, program_account(vec![0; len]));
++        let payer = self.payer;
++        self.run(
++            builders::init_attestation(
++                &payer,
++                &attestation,
++                wire::SCHEME_ED25519,
++                count,
++                message.len() as u32,
++            ),
++            Ok(()),
++        );
++        let digest = wire::digest(message);
++        let mut body = message.to_vec();
++        for index in signers {
++            body.push(*index);
++            body.extend_from_slice(&guardians[usize::from(*index)].sign(&digest).to_bytes());
++        }
++        self.run(
++            builders::write_attestation(&payer, &attestation, 0, body),
++            Ok(()),
++        );
++        let delta = self.run(
++            builders::verify_attestation(&attestation, &self.deployment_id, self.epoch, 0, count),
++            Ok(()),
++        );
++        assert_eq!(delta, 0);
++        attestation
++    }
++
++    fn mint_ix(&self, attestation: &Pubkey, sequence: u64, recipient: &Pubkey) -> Instruction {
++        builders::mint_from_deposit(
++            &self.payer,
++            attestation,
++            &self.deployment_id,
++            self.epoch,
++            sequence,
++            recipient,
++        )
++    }
++}
++
++#[test]
++fn mint_then_burn_moves_native_supply_exactly() {
++    let mut env = Env::new();
++    let recipient = Pubkey::new_unique();
++    env.accounts.insert(
++        recipient,
++        AccountSharedData::new(1_000_000_000, 0, &system_program::id()),
++    );
++    let message = env.deposit_message(0, 2_500_000, &recipient);
++    let guardians = env.guardians.clone();
++    let attestation = env.attest(&message, &[0, 2], &guardians);
++    let attestation_lamports = env.lamports(&attestation);
++    let payer_before = env.lamports(&env.payer);
++    let total_before = env.total_lamports();
++
++    let delta = env.run(env.mint_ix(&attestation, 0, &recipient), Ok(()));
++    let native = 2_500_000 * SCALE;
++    assert_eq!(delta, i128::from(native));
++    assert_eq!(env.total_lamports(), total_before + u128::from(native));
++    assert_eq!(env.lamports(&recipient), 1_000_000_000 + native);
++    let record_address = state::mint_record_address(&crate::id(), &env.deployment_id, 0).0;
++    let record_account = &env.accounts[&record_address];
++    assert_eq!(record_account.owner(), &crate::id());
++    let record = MintRecord::decode(record_account.data()).unwrap();
++    assert_eq!(record.recipient, recipient.to_bytes());
++    assert_eq!(record.native_amount, native);
++    assert_eq!(record.slot, SLOT);
++    // The attestation is closed and refunded to the payer, who paid the record rent.
++    assert_eq!(env.lamports(&attestation), 0);
++    assert!(env.accounts[&attestation].data().is_empty());
++    assert_eq!(
++        env.lamports(&env.payer),
++        payer_before + attestation_lamports - record_account.lamports()
++    );
++    let bridge = env.state();
++    assert_eq!(bridge.total_minted_native, u128::from(native));
++    assert_eq!(bridge.outstanding_native, u128::from(native));
++    assert_eq!(bridge.minted_in_rate_epoch, native);
++    assert_eq!(bridge.rate_limit_epoch, EPOCH);
++
++    // Burn: the burner pays the receipt rent; `amount` leaves supply.
++    let state_address = state::state_address(&crate::id(), &env.deployment_id).0;
++    let state_lamports = env.lamports(&state_address);
++    let burner_before = env.lamports(&recipient);
++    let total_before = env.total_lamports();
++    let solana_wallet = [0x5A; 32];
++    let amount = 1_000_000 * SCALE;
++    let delta = env.run(
++        builders::burn_for_withdrawal(&recipient, &env.deployment_id, 0, amount, solana_wallet),
++        Ok(()),
++    );
++    assert_eq!(delta, -i128::from(amount));
++    assert_eq!(env.total_lamports(), total_before - u128::from(amount));
++    assert_eq!(env.lamports(&state_address), state_lamports);
++    let receipt_address = state::burn_receipt_address(&crate::id(), &env.deployment_id, 0).0;
++    let receipt_account = &env.accounts[&receipt_address];
++    let receipt = BurnReceipt::decode(receipt_account.data()).unwrap();
++    assert_eq!(receipt.burn_sequence, 0);
++    assert_eq!(receipt.burner, recipient.to_bytes());
++    assert_eq!(receipt.source_amount, 1_000_000);
++    assert_eq!(receipt.solana_recipient, solana_wallet);
++    assert_eq!(receipt.event_id, wire::burn_event_id(&env.deployment_id, 0));
++    assert_eq!(
++        env.lamports(&recipient),
++        burner_before - amount - receipt_account.lamports()
++    );
++    let bridge = env.state();
++    assert_eq!(bridge.next_burn_sequence, 1);
++    assert_eq!(bridge.total_burned_native, u128::from(amount));
++    assert_eq!(bridge.outstanding_native, u128::from(native - amount));
++
++    // Receipt address must be the next sequence; amounts must be whole source units.
++    env.run(
++        builders::burn_for_withdrawal(&recipient, &env.deployment_id, 0, SCALE, solana_wallet),
++        Err(bridge_error(BridgeError::InvalidRecordAccount)),
++    );
++    env.run(
++        builders::burn_for_withdrawal(&recipient, &env.deployment_id, 1, SCALE + 1, solana_wallet),
++        Err(bridge_error(BridgeError::NotMultipleOfScale)),
++    );
++}
++
++#[test]
++fn replayed_deposit_is_rejected_by_the_builtin() {
++    let mut env = Env::new();
++    let recipient = Pubkey::new_unique();
++    env.accounts.insert(
++        recipient,
++        AccountSharedData::new(1_000_000_000, 0, &system_program::id()),
++    );
++    let message = env.deposit_message(7, 10, &recipient);
++    let guardians = env.guardians.clone();
++    let first = env.attest(&message, &[0, 1], &guardians);
++    env.run(env.mint_ix(&first, 7, &recipient), Ok(()));
++    let second = env.attest(&message, &[1, 2], &guardians);
++    let delta = env.run(
++        env.mint_ix(&second, 7, &recipient),
++        Err(bridge_error(BridgeError::DepositAlreadyMinted)),
++    );
++    assert_eq!(delta, 0);
++    assert_eq!(env.state().minted_count, 1);
++}
++
++#[test]
++fn below_threshold_and_foreign_signatures_do_not_mint() {
++    let mut env = Env::new();
++    let recipient = Pubkey::new_unique();
++    let message = env.deposit_message(0, 10, &recipient);
++    let guardians = env.guardians.clone();
++    let attestation = env.attest(&message, &[1], &guardians);
++    env.run(
++        env.mint_ix(&attestation, 0, &recipient),
++        Err(bridge_error(BridgeError::BelowThreshold)),
++    );
++
++    let outsiders: Vec<_> = (50..53u8)
++        .map(|s| ed25519_dalek::SigningKey::from_bytes(&[s; 32]))
++        .collect();
++    let attestation = Pubkey::new_unique();
++    let len = AttestationHeader::total_len(wire::SCHEME_ED25519, message.len() as u32, 2).unwrap();
++    env.accounts
++        .insert(attestation, program_account(vec![0; len]));
++    let payer = env.payer;
++    env.run(
++        builders::init_attestation(
++            &payer,
++            &attestation,
++            wire::SCHEME_ED25519,
++            2,
++            message.len() as u32,
++        ),
++        Ok(()),
++    );
++    let digest = wire::digest(&message);
++    let mut body = message.clone();
++    for index in [0u8, 1] {
++        body.push(index);
++        body.extend_from_slice(&outsiders[usize::from(index)].sign(&digest).to_bytes());
++    }
++    env.run(
++        builders::write_attestation(&payer, &attestation, 0, body),
++        Ok(()),
++    );
++    env.run(
++        builders::verify_attestation(&attestation, &env.deployment_id, 1, 0, 2),
++        Err(bridge_error(BridgeError::InvalidSignature)),
++    );
++}
++
++#[test]
++fn prefunded_record_address_cannot_block_a_mint() {
++    let mut env = Env::new();
++    let recipient = Pubkey::new_unique();
++    env.accounts.insert(
++        recipient,
++        AccountSharedData::new(1_000_000_000, 0, &system_program::id()),
++    );
++    let record_address = state::mint_record_address(&crate::id(), &env.deployment_id, 0).0;
++    env.accounts.insert(
++        record_address,
++        AccountSharedData::new(5, 0, &system_program::id()),
++    );
++    let message = env.deposit_message(0, 10, &recipient);
++    let guardians = env.guardians.clone();
++    let attestation = env.attest(&message, &[0, 1], &guardians);
++    assert_eq!(
++        env.run(env.mint_ix(&attestation, 0, &recipient), Ok(())),
++        i128::from(10 * SCALE)
++    );
++    assert_eq!(env.accounts[&record_address].owner(), &crate::id());
++}
++
++#[test]
++fn mint_rejects_wrong_record_or_recipient_accounts() {
++    let mut env = Env::new();
++    let recipient = Pubkey::new_unique();
++    let message = env.deposit_message(0, 10, &recipient);
++    let guardians = env.guardians.clone();
++    let attestation = env.attest(&message, &[0, 1], &guardians);
++    env.run(
++        env.mint_ix(&attestation, 1, &recipient),
++        Err(bridge_error(BridgeError::InvalidRecordAccount)),
++    );
++    let other = Pubkey::new_unique();
++    env.run(
++        env.mint_ix(&attestation, 0, &other),
++        Err(bridge_error(BridgeError::InvalidRecipientAccount)),
++    );
++    // Only the writer may consume the attestation.
++    let mut ix = env.mint_ix(&attestation, 0, &recipient);
++    let stranger = Pubkey::new_unique();
++    env.accounts.insert(
++        stranger,
++        AccountSharedData::new(10_000_000_000, 0, &system_program::id()),
++    );
++    ix.accounts[0].pubkey = stranger;
++    env.run(ix, Err(bridge_error(BridgeError::AttestationWriter)));
++}
++
++#[test]
++fn govern_rotates_guardians_and_retires_old_set() {
++    let mut env = Env::new();
++    let next: Vec<_> = (60..64u8)
++        .map(|s| ed25519_dalek::SigningKey::from_bytes(&[s; 32]))
++        .collect();
++    let action = GovernanceAction::RotateGuardians {
++        new_epoch: 2,
++        threshold: 3,
++        scheme: wire::SCHEME_ED25519,
++        keys: next
++            .iter()
++            .map(|key| GuardianKey {
++                ed25519: Some(key.verifying_key().to_bytes()),
++                mldsa65: None,
++            })
++            .collect(),
++    };
++    let message =
++        wire::encode_governance(&env.header(wire::KIND_DESTINATION_GOVERNANCE, 0), &action);
++    let guardians = env.guardians.clone();
++    let attestation = env.attest(&message, &[0, 1], &guardians);
++    let payer = env.payer;
++    let ix = builders::govern(&payer, &attestation, &env.deployment_id, 1, Some(2));
++    assert_eq!(env.run(ix, Ok(())), 0);
++    assert_eq!(env.state().guardian_epoch, 2);
++    assert_eq!(env.state().governance_sequence, 1);
++    let new_set_address = state::guardian_set_address(&crate::id(), &env.deployment_id, 2).0;
++    let new_set = GuardianSet::decode(env.accounts[&new_set_address].data()).unwrap();
++    assert_eq!(
++        (new_set.epoch, new_set.threshold, new_set.keys.len()),
++        (2, 3, 4)
++    );
++
++    // Old-epoch attestations and the old set account are no longer usable.
++    let recipient = Pubkey::new_unique();
++    let stale = env.deposit_message(0, 1, &recipient);
++    let attestation = Pubkey::new_unique();
++    let len = AttestationHeader::total_len(wire::SCHEME_ED25519, stale.len() as u32, 2).unwrap();
++    env.accounts
++        .insert(attestation, program_account(vec![0; len]));
++    env.run(
++        builders::init_attestation(
++            &payer,
++            &attestation,
++            wire::SCHEME_ED25519,
++            2,
++            stale.len() as u32,
++        ),
++        Ok(()),
++    );
++    env.run(
++        builders::write_attestation(&payer, &attestation, 0, stale.clone()),
++        Ok(()),
++    );
++    env.run(
++        builders::verify_attestation(&attestation, &env.deployment_id, 1, 0, 2),
++        Err(bridge_error(BridgeError::WrongSignerEpoch)),
++    );
++
++    env.epoch = 2;
++    let fresh = env.deposit_message(0, 1, &recipient);
++    let attestation = env.attest(&fresh, &[0, 2, 3], &next);
++    env.accounts.insert(
++        recipient,
++        AccountSharedData::new(1_000_000_000, 0, &system_program::id()),
++    );
++    assert_eq!(
++        env.run(env.mint_ix(&attestation, 0, &recipient), Ok(())),
++        i128::from(SCALE)
++    );
++}
++
++#[test]
++fn pauser_can_only_pause() {
++    let mut env = Env::new();
++    let pauser = Pubkey::new_from_array([0x77; 32]);
++    env.accounts.insert(
++        pauser,
++        AccountSharedData::new(1_000_000_000, 0, &system_program::id()),
++    );
++    let stranger = Pubkey::new_unique();
++    env.accounts.insert(
++        stranger,
++        AccountSharedData::new(1_000_000_000, 0, &system_program::id()),
++    );
++    env.run(
++        builders::pause(&stranger, &env.deployment_id, 1, 1),
++        Err(bridge_error(BridgeError::NotPauser)),
++    );
++    env.run(builders::pause(&pauser, &env.deployment_id, 0, 1), Ok(()));
++    assert!(env.state().is_flag(state::FLAG_WITHDRAWALS_PAUSED));
++    assert!(!env.state().is_flag(state::FLAG_DEPOSITS_PAUSED));
++    env.run(
++        builders::pause(&pauser, &env.deployment_id, 2, 0),
++        Err(bridge_error(BridgeError::UnpauseNotAllowed)),
++    );
++    let burner = Pubkey::new_unique();
++    env.accounts.insert(
++        burner,
++        AccountSharedData::new(1_000_000_000, 0, &system_program::id()),
++    );
++    env.run(
++        builders::burn_for_withdrawal(&burner, &env.deployment_id, 0, SCALE, [1; 32]),
++        Err(bridge_error(BridgeError::WithdrawalsPaused)),
++    );
++}
++
++#[test]
++fn spoofed_state_account_is_rejected() {
++    let mut env = Env::new();
++    let state_address = state::state_address(&crate::id(), &env.deployment_id).0;
++    let fake = Pubkey::new_unique();
++    let data = env.accounts[&state_address].data().to_vec();
++    assert_eq!(data.len(), STATE_LEN);
++    env.accounts.insert(fake, program_account(data));
++    let burner = Pubkey::new_unique();
++    env.accounts.insert(
++        burner,
++        AccountSharedData::new(1_000_000_000, 0, &system_program::id()),
++    );
++    let mut ix = builders::burn_for_withdrawal(&burner, &env.deployment_id, 0, SCALE, [1; 32]);
++    ix.accounts[1].pubkey = fake;
++    env.run(ix, Err(bridge_error(BridgeError::InvalidStateAccount)));
++}
+diff --git a/programs/lattice-bridge/src/state.rs b/programs/lattice-bridge/src/state.rs
+new file mode 100644
+index 000000000..85ef80788
+--- /dev/null
++++ b/programs/lattice-bridge/src/state.rs
+@@ -0,0 +1,633 @@
++//! Fixed little-endian account layouts. Every account starts with an 8-byte
++//! ASCII magic and a 1-byte layout version. Offsets are documented in
++//! docs/NATIVE_ISSUANCE.md; the first 98 bytes of `LATSTAT1`, and the whole
++//! of `LATMINT1` and `LATBURN1`, are exactly BRIDGE_SPEC §9.
++
++use {
++    crate::{
++        error::{BridgeError, BridgeResult},
++        wire::{self, GuardianKey, a32, u8_at, u64_at},
++    },
++    solana_pubkey::Pubkey,
++};
++
++pub const LAYOUT_VERSION: u8 = 1;
++
++pub const STATE_MAGIC: &[u8; 8] = b"LATSTAT1";
++pub const GUARDIAN_SET_MAGIC: &[u8; 8] = b"LATGSET1";
++pub const MINT_RECORD_MAGIC: &[u8; 8] = b"LATMINT1";
++pub const BURN_RECEIPT_MAGIC: &[u8; 8] = b"LATBURN1";
++pub const ATTESTATION_MAGIC: &[u8; 8] = b"LATATST1";
++
++pub const STATE_LEN: usize = 384;
++pub const MINT_RECORD_LEN: usize = 129;
++pub const BURN_RECEIPT_LEN: usize = 169;
++pub const GUARDIAN_SET_HEADER_LEN: usize = 64;
++pub const ATTESTATION_HEADER_LEN: usize = 96;
++
++pub const FLAG_DEPOSITS_PAUSED: u8 = 1;
++pub const FLAG_WITHDRAWALS_PAUSED: u8 = 1 << 1;
++pub const FLAG_LATTICE_GENESIS_BOUND: u8 = 1 << 2;
++
++pub const NETWORK_MAINNET: u8 = 1;
++pub const NETWORK_TESTNET: u8 = 2;
++pub const NETWORK_DEVELOPMENT: u8 = 3;
++
++pub const SEED_STATE: &[u8] = b"state";
++pub const SEED_GUARDIAN_SET: &[u8] = b"guardian-set";
++pub const SEED_MINTED: &[u8] = b"minted";
++pub const SEED_BURN: &[u8] = b"burn";
++
++fn put(out: &mut [u8], offset: usize, bytes: &[u8]) {
++    if let Some(dst) = offset
++        .checked_add(bytes.len())
++        .and_then(|end| out.get_mut(offset..end))
++    {
++        dst.copy_from_slice(bytes);
++    }
++}
++
++fn u128_at(d: &[u8], o: usize) -> BridgeResult<u128> {
++    d.get(o..o.saturating_add(16))
++        .and_then(|s| <[u8; 16]>::try_from(s).ok())
++        .map(u128::from_le_bytes)
++        .ok_or(BridgeError::MalformedMessage)
++}
++
++fn u32_at(d: &[u8], o: usize) -> BridgeResult<u32> {
++    d.get(o..o.saturating_add(4))
++        .and_then(|s| <[u8; 4]>::try_from(s).ok())
++        .map(u32::from_le_bytes)
++        .ok_or(BridgeError::MalformedMessage)
++}
++
++fn check_magic(d: &[u8], magic: &[u8; 8], error: BridgeError) -> BridgeResult<()> {
++    if d.get(0..8) == Some(magic.as_slice()) && d.get(8) == Some(&LAYOUT_VERSION) {
++        Ok(())
++    } else {
++        Err(error)
++    }
++}
++
++/// Bridge state, one per deployment, at `PDA(["state", deployment_id])`.
++#[derive(Clone, Debug, Default, PartialEq, Eq)]
++pub struct BridgeState {
++    // BRIDGE_SPEC §9.3 prefix (offsets 0..98)
++    pub deployment_id: [u8; 32],
++    pub next_burn_sequence: u64,
++    pub minted_count: u64,
++    pub total_minted_native: u128,
++    pub total_burned_native: u128,
++    pub guardian_epoch: u64,
++    pub flags: u8,
++    // Lattice extension (offsets 98..384)
++    pub bump: u8,
++    pub source_decimals: u8,
++    pub network: u8,
++    pub solana_genesis_hash: [u8; 32],
++    pub lattice_genesis_hash: [u8; 32],
++    pub source_program_id: [u8; 32],
++    pub source_mint: [u8; 32],
++    pub pauser: [u8; 32],
++    pub governance_sequence: u64,
++    pub max_mint_per_epoch: u64,
++    pub rate_limit_epoch: u64,
++    pub minted_in_rate_epoch: u64,
++    /// Lamports issued in genesis against deposits finalized on Solana before
++    /// launch (pre-consumed mint records); included in `total_minted_native`.
++    pub genesis_bootstrap_native: u64,
++    /// Genesis lamports NOT covered by any Solana deposit (testnet faucet etc).
++    /// The Lattice mainnet genesis tool refuses to produce a non-zero value.
++    pub genesis_unbacked_native: u64,
++    /// `total_minted_native - total_burned_native`, kept for RPC readers.
++    pub outstanding_native: u128,
++    pub last_mint_slot: u64,
++    pub last_burn_slot: u64,
++}
++
++impl BridgeState {
++    pub fn is_flag(&self, flag: u8) -> bool {
++        self.flags & flag != 0
++    }
++
++    pub fn set_flag(&mut self, flag: u8, value: bool) {
++        if value {
++            self.flags |= flag;
++        } else {
++            self.flags &= !flag;
++        }
++    }
++
++    pub fn encode(&self) -> Vec<u8> {
++        let mut d = vec![0u8; STATE_LEN];
++        put(&mut d, 0, STATE_MAGIC);
++        put(&mut d, 8, &[LAYOUT_VERSION]);
++        put(&mut d, 9, &self.deployment_id);
++        put(&mut d, 41, &self.next_burn_sequence.to_le_bytes());
++        put(&mut d, 49, &self.minted_count.to_le_bytes());
++        put(&mut d, 57, &self.total_minted_native.to_le_bytes());
++        put(&mut d, 73, &self.total_burned_native.to_le_bytes());
++        put(&mut d, 89, &self.guardian_epoch.to_le_bytes());
++        put(&mut d, 97, &[self.flags]);
++        put(&mut d, 98, &[self.bump, self.source_decimals, self.network]);
++        put(&mut d, 104, &self.solana_genesis_hash);
++        put(&mut d, 136, &self.lattice_genesis_hash);
++        put(&mut d, 168, &self.source_program_id);
++        put(&mut d, 200, &self.source_mint);
++        put(&mut d, 232, &self.pauser);
++        put(&mut d, 264, &self.governance_sequence.to_le_bytes());
++        put(&mut d, 272, &self.max_mint_per_epoch.to_le_bytes());
++        put(&mut d, 280, &self.rate_limit_epoch.to_le_bytes());
++        put(&mut d, 288, &self.minted_in_rate_epoch.to_le_bytes());
++        put(&mut d, 296, &self.genesis_bootstrap_native.to_le_bytes());
++        put(&mut d, 304, &self.genesis_unbacked_native.to_le_bytes());
++        put(&mut d, 312, &self.outstanding_native.to_le_bytes());
++        put(&mut d, 328, &self.last_mint_slot.to_le_bytes());
++        put(&mut d, 336, &self.last_burn_slot.to_le_bytes());
++        d
++    }
++
++    pub fn decode(d: &[u8]) -> BridgeResult<Self> {
++        if d.len() != STATE_LEN {
++            return Err(BridgeError::InvalidStateAccount);
++        }
++        check_magic(d, STATE_MAGIC, BridgeError::InvalidStateAccount)?;
++        Ok(Self {
++            deployment_id: a32(d, 9)?,
++            next_burn_sequence: u64_at(d, 41)?,
++            minted_count: u64_at(d, 49)?,
++            total_minted_native: u128_at(d, 57)?,
++            total_burned_native: u128_at(d, 73)?,
++            guardian_epoch: u64_at(d, 89)?,
++            flags: u8_at(d, 97)?,
++            bump: u8_at(d, 98)?,
++            source_decimals: u8_at(d, 99)?,
++            network: u8_at(d, 100)?,
++            solana_genesis_hash: a32(d, 104)?,
++            lattice_genesis_hash: a32(d, 136)?,
++            source_program_id: a32(d, 168)?,
++            source_mint: a32(d, 200)?,
++            pauser: a32(d, 232)?,
++            governance_sequence: u64_at(d, 264)?,
++            max_mint_per_epoch: u64_at(d, 272)?,
++            rate_limit_epoch: u64_at(d, 280)?,
++            minted_in_rate_epoch: u64_at(d, 288)?,
++            genesis_bootstrap_native: u64_at(d, 296)?,
++            genesis_unbacked_native: u64_at(d, 304)?,
++            outstanding_native: u128_at(d, 312)?,
++            last_mint_slot: u64_at(d, 328)?,
++            last_burn_slot: u64_at(d, 336)?,
++        })
++    }
++}
++
++/// Guardian set for one epoch at `PDA(["guardian-set", deployment_id, u64 epoch])`.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct GuardianSet {
++    pub scheme: u8,
++    pub threshold: u8,
++    pub bump: u8,
++    pub epoch: u64,
++    pub created_slot: u64,
++    pub deployment_id: [u8; 32],
++    pub keys: Vec<GuardianKey>,
++}
++
++impl GuardianSet {
++    pub fn encoded_len(scheme: u8, count: usize) -> BridgeResult<usize> {
++        wire::key_entry_len(scheme)?
++            .checked_mul(count)
++            .and_then(|keys| keys.checked_add(GUARDIAN_SET_HEADER_LEN))
++            .ok_or(BridgeError::Overflow)
++    }
++
++    /// BRIDGE_SPEC §4 constraints plus scheme/key-shape consistency.
++    pub fn validate(&self) -> BridgeResult<()> {
++        let count = self.keys.len();
++        let threshold = usize::from(self.threshold);
++        if count == 0
++            || count > wire::MAX_GUARDIANS
++            || threshold < 2
++            || threshold > count
++            || threshold.saturating_mul(2) <= count
++        {
++            return Err(BridgeError::InvalidGuardianSet);
++        }
++        wire::key_entry_len(self.scheme).map_err(|_| BridgeError::InvalidGuardianSet)?;
++        for (i, key) in self.keys.iter().enumerate() {
++            if key.ed25519.is_some() != wire::scheme_has_ed25519(self.scheme)
++                || key.mldsa65.is_some() != wire::scheme_has_mldsa65(self.scheme)
++            {
++                return Err(BridgeError::InvalidGuardianSet);
++            }
++            if let Some(ed) = &key.ed25519 {
++                if ed.iter().all(|b| *b == 0) {
++                    return Err(BridgeError::InvalidGuardianSet);
++                }
++            }
++            if let Some(pq) = &key.mldsa65 {
++                if pq.len() != agave_mldsa_verify::MLDSA65_PUBLIC_KEY_LEN
++                    || pq.iter().all(|b| *b == 0)
++                {
++                    return Err(BridgeError::InvalidGuardianSet);
++                }
++            }
++            for other in self.keys.iter().skip(i.saturating_add(1)) {
++                let same_ed = key.ed25519.is_some() && key.ed25519 == other.ed25519;
++                let same_pq = key.mldsa65.is_some() && key.mldsa65 == other.mldsa65;
++                if same_ed || same_pq {
++                    return Err(BridgeError::InvalidGuardianSet);
++                }
++            }
++        }
++        Ok(())
++    }
++
++    pub fn encode(&self) -> BridgeResult<Vec<u8>> {
++        let mut d = vec![0u8; GUARDIAN_SET_HEADER_LEN];
++        put(&mut d, 0, GUARDIAN_SET_MAGIC);
++        put(
++            &mut d,
++            8,
++            &[
++                LAYOUT_VERSION,
++                self.scheme,
++                self.threshold,
++                u8::try_from(self.keys.len()).map_err(|_| BridgeError::InvalidGuardianSet)?,
++                self.bump,
++            ],
++        );
++        put(&mut d, 16, &self.epoch.to_le_bytes());
++        put(&mut d, 24, &self.created_slot.to_le_bytes());
++        put(&mut d, 32, &self.deployment_id);
++        for key in &self.keys {
++            wire::encode_key_entry(key, &mut d);
++        }
++        if d.len() != Self::encoded_len(self.scheme, self.keys.len())? {
++            return Err(BridgeError::InvalidGuardianSet);
++        }
++        Ok(d)
++    }
++
++    pub fn decode(d: &[u8]) -> BridgeResult<Self> {
++        check_magic(
++            d,
++            GUARDIAN_SET_MAGIC,
++            BridgeError::InvalidGuardianSetAccount,
++        )?;
++        let scheme = u8_at(d, 9)?;
++        let count = usize::from(u8_at(d, 11)?);
++        let entry_len =
++            wire::key_entry_len(scheme).map_err(|_| BridgeError::InvalidGuardianSetAccount)?;
++        if d.len() != Self::encoded_len(scheme, count)? {
++            return Err(BridgeError::InvalidGuardianSetAccount);
++        }
++        let keys = d
++            .get(GUARDIAN_SET_HEADER_LEN..)
++            .ok_or(BridgeError::InvalidGuardianSetAccount)?
++            .chunks_exact(entry_len)
++            .map(|entry| wire::parse_key_entry(scheme, entry))
++            .collect::<BridgeResult<Vec<_>>>()?;
++        Ok(Self {
++            scheme,
++            threshold: u8_at(d, 10)?,
++            bump: u8_at(d, 12)?,
++            epoch: u64_at(d, 16)?,
++            created_slot: u64_at(d, 24)?,
++            deployment_id: a32(d, 32)?,
++            keys,
++        })
++    }
++}
++
++/// Exactly-once marker for a Solana deposit at
++/// `PDA(["minted", deployment_id, u64 deposit_sequence])` (BRIDGE_SPEC §9).
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct MintRecord {
++    pub deployment_id: [u8; 32],
++    pub deposit_sequence: u64,
++    pub recipient: [u8; 32],
++    pub native_amount: u64,
++    pub slot: u64,
++    pub event_id: [u8; 32],
++}
++
++impl MintRecord {
++    pub fn encode(&self) -> Vec<u8> {
++        let mut d = vec![0u8; MINT_RECORD_LEN];
++        put(&mut d, 0, MINT_RECORD_MAGIC);
++        put(&mut d, 8, &[LAYOUT_VERSION]);
++        put(&mut d, 9, &self.deployment_id);
++        put(&mut d, 41, &self.deposit_sequence.to_le_bytes());
++        put(&mut d, 49, &self.recipient);
++        put(&mut d, 81, &self.native_amount.to_le_bytes());
++        put(&mut d, 89, &self.slot.to_le_bytes());
++        put(&mut d, 97, &self.event_id);
++        d
++    }
++
++    pub fn decode(d: &[u8]) -> BridgeResult<Self> {
++        if d.len() != MINT_RECORD_LEN {
++            return Err(BridgeError::InvalidRecordAccount);
++        }
++        check_magic(d, MINT_RECORD_MAGIC, BridgeError::InvalidRecordAccount)?;
++        Ok(Self {
++            deployment_id: a32(d, 9)?,
++            deposit_sequence: u64_at(d, 41)?,
++            recipient: a32(d, 49)?,
++            native_amount: u64_at(d, 81)?,
++            slot: u64_at(d, 89)?,
++            event_id: a32(d, 97)?,
++        })
++    }
++}
++
++/// Durable withdrawal receipt at `PDA(["burn", deployment_id, u64 burn_sequence])`
++/// (BRIDGE_SPEC §9.2). Never closed.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct BurnReceipt {
++    pub deployment_id: [u8; 32],
++    pub burn_sequence: u64,
++    pub burner: [u8; 32],
++    pub native_amount: u64,
++    pub source_amount: u64,
++    pub solana_recipient: [u8; 32],
++    pub slot: u64,
++    pub event_id: [u8; 32],
++}
++
++impl BurnReceipt {
++    pub fn encode(&self) -> Vec<u8> {
++        let mut d = vec![0u8; BURN_RECEIPT_LEN];
++        put(&mut d, 0, BURN_RECEIPT_MAGIC);
++        put(&mut d, 8, &[LAYOUT_VERSION]);
++        put(&mut d, 9, &self.deployment_id);
++        put(&mut d, 41, &self.burn_sequence.to_le_bytes());
++        put(&mut d, 49, &self.burner);
++        put(&mut d, 81, &self.native_amount.to_le_bytes());
++        put(&mut d, 89, &self.source_amount.to_le_bytes());
++        put(&mut d, 97, &self.solana_recipient);
++        put(&mut d, 129, &self.slot.to_le_bytes());
++        put(&mut d, 137, &self.event_id);
++        d
++    }
++
++    pub fn decode(d: &[u8]) -> BridgeResult<Self> {
++        if d.len() != BURN_RECEIPT_LEN {
++            return Err(BridgeError::InvalidRecordAccount);
++        }
++        check_magic(d, BURN_RECEIPT_MAGIC, BridgeError::InvalidRecordAccount)?;
++        Ok(Self {
++            deployment_id: a32(d, 9)?,
++            burn_sequence: u64_at(d, 41)?,
++            burner: a32(d, 49)?,
++            native_amount: u64_at(d, 81)?,
++            source_amount: u64_at(d, 89)?,
++            solana_recipient: a32(d, 97)?,
++            slot: u64_at(d, 129)?,
++            event_id: a32(d, 137)?,
++        })
++    }
++}
++
++pub const ATTESTATION_OPEN: u8 = 1;
++pub const ATTESTATION_SEALED: u8 = 2;
++
++/// Staging account (keypair address, created by the relayer with this
++/// program as owner) holding one message plus guardian signatures:
++/// `header(96) || message(message_len) || signature_count × entry`.
++/// Entry = `guardian_index u8 || [ed25519 sig 64] || [ML-DSA-65 sig 3309]`.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct AttestationHeader {
++    pub scheme: u8,
++    pub status: u8,
++    pub signature_count: u8,
++    pub verified_bitmap: u32,
++    pub signer_epoch: u64,
++    pub digest: [u8; 32],
++    pub writer: [u8; 32],
++    pub message_len: u32,
++}
++
++impl AttestationHeader {
++    pub fn total_len(scheme: u8, message_len: u32, signature_count: u8) -> BridgeResult<usize> {
++        signature_entry_len(scheme)?
++            .checked_mul(usize::from(signature_count))
++            .and_then(|sigs| sigs.checked_add(usize::try_from(message_len).ok()?))
++            .and_then(|body| body.checked_add(ATTESTATION_HEADER_LEN))
++            .ok_or(BridgeError::Overflow)
++    }
++
++    pub fn encode_into(&self, d: &mut [u8]) {
++        put(d, 0, ATTESTATION_MAGIC);
++        put(
++            d,
++            8,
++            &[
++                LAYOUT_VERSION,
++                self.scheme,
++                self.status,
++                self.signature_count,
++            ],
++        );
++        put(d, 12, &self.verified_bitmap.to_le_bytes());
++        put(d, 16, &self.signer_epoch.to_le_bytes());
++        put(d, 24, &self.digest);
++        put(d, 56, &self.writer);
++        put(d, 88, &self.message_len.to_le_bytes());
++    }
++
++    pub fn decode(d: &[u8]) -> BridgeResult<Self> {
++        check_magic(d, ATTESTATION_MAGIC, BridgeError::InvalidAttestationAccount)?;
++        let header = Self {
++            scheme: u8_at(d, 9)?,
++            status: u8_at(d, 10)?,
++            signature_count: u8_at(d, 11)?,
++            verified_bitmap: u32_at(d, 12)?,
++            signer_epoch: u64_at(d, 16)?,
++            digest: a32(d, 24)?,
++            writer: a32(d, 56)?,
++            message_len: u32_at(d, 88)?,
++        };
++        if d.len() != Self::total_len(header.scheme, header.message_len, header.signature_count)? {
++            return Err(BridgeError::InvalidAttestationAccount);
++        }
++        Ok(header)
++    }
++
++    pub fn message<'a>(&self, d: &'a [u8]) -> BridgeResult<&'a [u8]> {
++        let end = ATTESTATION_HEADER_LEN
++            .checked_add(self.message_len as usize)
++            .ok_or(BridgeError::Overflow)?;
++        d.get(ATTESTATION_HEADER_LEN..end)
++            .ok_or(BridgeError::InvalidAttestationAccount)
++    }
++
++    pub fn signatures<'a>(&self, d: &'a [u8]) -> BridgeResult<&'a [u8]> {
++        let start = ATTESTATION_HEADER_LEN
++            .checked_add(self.message_len as usize)
++            .ok_or(BridgeError::Overflow)?;
++        d.get(start..).ok_or(BridgeError::InvalidAttestationAccount)
++    }
++}
++
++pub fn signature_entry_len(scheme: u8) -> BridgeResult<usize> {
++    let mut len = 1usize;
++    if wire::scheme_has_ed25519(scheme) {
++        len = len.saturating_add(64);
++    }
++    if wire::scheme_has_mldsa65(scheme) {
++        len = len.saturating_add(agave_mldsa_verify::MLDSA65_SIGNATURE_LEN);
++    }
++    wire::key_entry_len(scheme)?;
++    Ok(len)
++}
++
++pub fn state_address(program_id: &Pubkey, deployment_id: &[u8; 32]) -> (Pubkey, u8) {
++    Pubkey::find_program_address(&[SEED_STATE, deployment_id], program_id)
++}
++
++pub fn guardian_set_address(
++    program_id: &Pubkey,
++    deployment_id: &[u8; 32],
++    epoch: u64,
++) -> (Pubkey, u8) {
++    Pubkey::find_program_address(
++        &[SEED_GUARDIAN_SET, deployment_id, &epoch.to_le_bytes()],
++        program_id,
++    )
++}
++
++pub fn mint_record_address(
++    program_id: &Pubkey,
++    deployment_id: &[u8; 32],
++    deposit_sequence: u64,
++) -> (Pubkey, u8) {
++    Pubkey::find_program_address(
++        &[SEED_MINTED, deployment_id, &deposit_sequence.to_le_bytes()],
++        program_id,
++    )
++}
++
++pub fn burn_receipt_address(
++    program_id: &Pubkey,
++    deployment_id: &[u8; 32],
++    burn_sequence: u64,
++) -> (Pubkey, u8) {
++    Pubkey::find_program_address(
++        &[SEED_BURN, deployment_id, &burn_sequence.to_le_bytes()],
++        program_id,
++    )
++}
++
++#[cfg(test)]
++mod tests {
++    use {super::*, crate::wire::SCHEME_ED25519};
++
++    #[test]
++    fn state_round_trip_and_spec_prefix() {
++        let state = BridgeState {
++            deployment_id: [1; 32],
++            next_burn_sequence: 3,
++            minted_count: 4,
++            total_minted_native: 5,
++            total_burned_native: 6,
++            guardian_epoch: 7,
++            flags: FLAG_LATTICE_GENESIS_BOUND,
++            source_decimals: 6,
++            network: NETWORK_MAINNET,
++            max_mint_per_epoch: 99,
++            outstanding_native: 11,
++            ..BridgeState::default()
++        };
++        let d = state.encode();
++        assert_eq!(d.len(), STATE_LEN);
++        assert_eq!(&d[0..8], STATE_MAGIC);
++        assert_eq!(&d[9..41], &[1; 32]);
++        assert_eq!(&d[41..49], &3u64.to_le_bytes());
++        assert_eq!(&d[57..73], &5u128.to_le_bytes());
++        assert_eq!(&d[89..97], &7u64.to_le_bytes());
++        assert_eq!(d[97], FLAG_LATTICE_GENESIS_BOUND);
++        assert_eq!(BridgeState::decode(&d), Ok(state));
++        assert_eq!(
++            BridgeState::decode(&d[..STATE_LEN - 1]),
++            Err(BridgeError::InvalidStateAccount)
++        );
++    }
++
++    #[test]
++    fn record_layouts_match_spec_sizes() {
++        let record = MintRecord {
++            deployment_id: [1; 32],
++            deposit_sequence: 2,
++            recipient: [3; 32],
++            native_amount: 4,
++            slot: 5,
++            event_id: [6; 32],
++        };
++        assert_eq!(record.encode().len(), 129);
++        assert_eq!(MintRecord::decode(&record.encode()), Ok(record));
++        let receipt = BurnReceipt {
++            deployment_id: [1; 32],
++            burn_sequence: 2,
++            burner: [3; 32],
++            native_amount: 4_000,
++            source_amount: 4,
++            solana_recipient: [5; 32],
++            slot: 6,
++            event_id: [7; 32],
++        };
++        let d = receipt.encode();
++        assert_eq!(d.len(), 169);
++        assert_eq!(&d[137..169], &[7; 32]);
++        assert_eq!(BurnReceipt::decode(&d), Ok(receipt));
++    }
++
++    #[test]
++    fn guardian_set_constraints() {
++        let key = |b: u8| GuardianKey {
++            ed25519: Some([b; 32]),
++            mldsa65: None,
++        };
++        let mut set = GuardianSet {
++            scheme: SCHEME_ED25519,
++            threshold: 2,
++            bump: 0,
++            epoch: 1,
++            created_slot: 0,
++            deployment_id: [0; 32],
++            keys: vec![key(1), key(2), key(3)],
++        };
++        assert_eq!(set.validate(), Ok(()));
++        assert_eq!(GuardianSet::decode(&set.encode().unwrap()), Ok(set.clone()));
++        set.threshold = 1;
++        assert_eq!(set.validate(), Err(BridgeError::InvalidGuardianSet));
++        set.threshold = 2;
++        set.keys.push(key(4));
++        // 2 * 2 > 4 fails: not a strict majority
++        assert_eq!(set.validate(), Err(BridgeError::InvalidGuardianSet));
++        set.threshold = 3;
++        assert_eq!(set.validate(), Ok(()));
++        set.keys[3] = key(1);
++        assert_eq!(set.validate(), Err(BridgeError::InvalidGuardianSet));
++        set.keys[3] = key(0);
++        assert_eq!(set.validate(), Err(BridgeError::InvalidGuardianSet));
++        set.keys[3] = GuardianKey {
++            ed25519: Some([4; 32]),
++            mldsa65: Some(vec![1; agave_mldsa_verify::MLDSA65_PUBLIC_KEY_LEN]),
++        };
++        assert_eq!(set.validate(), Err(BridgeError::InvalidGuardianSet));
++    }
++
++    #[test]
++    fn attestation_sizes() {
++        assert_eq!(signature_entry_len(1), Ok(65));
++        assert_eq!(signature_entry_len(2), Ok(1 + 3309));
++        assert_eq!(signature_entry_len(3), Ok(1 + 64 + 3309));
++        assert!(signature_entry_len(4).is_err());
++        assert_eq!(
++            AttestationHeader::total_len(1, 276, 13),
++            Ok(96 + 276 + 13 * 65)
++        );
++    }
++}
+diff --git a/programs/lattice-bridge/src/tests.rs b/programs/lattice-bridge/src/tests.rs
+new file mode 100644
+index 000000000..62ae07179
+--- /dev/null
++++ b/programs/lattice-bridge/src/tests.rs
+@@ -0,0 +1,1045 @@
++//! Unit tests over the pure bridge logic with real Ed25519 and ML-DSA-65
++//! signatures. `Harness` applies each operation the way the processor does:
++//! on a copy of the state that is committed (together with balances, the
++//! consumed-record set and capitalization) only if every check passes,
++//! mirroring transaction atomicity. Processor-level tests that run the
++//! actual builtin live in `processor/tests.rs` (feature
++//! `dev-context-only-utils`).
++#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
++
++use {
++    crate::{
++        conversion,
++        error::BridgeError,
++        genesis::{self, BootstrapDeposit, GenesisBridgeConfig},
++        guardian, logic,
++        state::{
++            self, ATTESTATION_HEADER_LEN, ATTESTATION_OPEN, AttestationHeader, BridgeState,
++            BurnReceipt, FLAG_DEPOSITS_PAUSED, FLAG_LATTICE_GENESIS_BOUND, FLAG_WITHDRAWALS_PAUSED,
++            GuardianSet, MintRecord, NETWORK_MAINNET, NETWORK_TESTNET,
++        },
++        wire::{
++            self, GovernanceAction, GuardianKey, Header, KIND_DEPOSIT, KIND_DESTINATION_GOVERNANCE,
++            SCHEME_ED25519, SCHEME_HYBRID, SCHEME_MLDSA65, Transfer,
++        },
++    },
++    ed25519_dalek::Signer as _,
++    fips204::{
++        ml_dsa_65,
++        traits::{KeyGen, SerDes, Signer as _},
++    },
++    std::collections::{HashMap, HashSet},
++};
++
++const DEPLOYMENT_LABEL: &[u8] = b"lattice-test-1";
++const SOLANA_GENESIS: [u8; 32] = [0x11; 32];
++const LATTICE_GENESIS: [u8; 32] = [0x22; 32];
++const SOURCE_PROGRAM: [u8; 32] = [0x33; 32];
++const SOURCE_MINT: [u8; 32] = [0x44; 32];
++const DECIMALS: u8 = 6;
++const SCALE: u64 = 1_000;
++
++struct TestGuardian {
++    ed25519: Option<ed25519_dalek::SigningKey>,
++    mldsa65: Option<(Vec<u8>, ml_dsa_65::PrivateKey)>,
++}
++
++impl TestGuardian {
++    fn new(scheme: u8, seed: u8) -> Self {
++        let ed25519 = wire::scheme_has_ed25519(scheme)
++            .then(|| ed25519_dalek::SigningKey::from_bytes(&[seed; 32]));
++        let mldsa65 = wire::scheme_has_mldsa65(scheme).then(|| {
++            let (pk, sk) = ml_dsa_65::KG::keygen_from_seed(&[seed; 32]);
++            (pk.into_bytes().to_vec(), sk)
++        });
++        Self { ed25519, mldsa65 }
++    }
++
++    fn key(&self) -> GuardianKey {
++        GuardianKey {
++            ed25519: self.ed25519.as_ref().map(|k| k.verifying_key().to_bytes()),
++            mldsa65: self.mldsa65.as_ref().map(|(pk, _)| pk.clone()),
++        }
++    }
++
++    fn sign(&self, index: u8, digest: &[u8; 32]) -> Vec<u8> {
++        let mut entry = vec![index];
++        if let Some(key) = &self.ed25519 {
++            entry.extend_from_slice(&key.sign(digest).to_bytes());
++        }
++        if let Some((_, sk)) = &self.mldsa65 {
++            entry.extend_from_slice(&sk.try_sign_with_seed(&[7; 32], digest, &[]).unwrap());
++        }
++        entry
++    }
++}
++
++fn guardians(scheme: u8, count: u8, seed_base: u8) -> Vec<TestGuardian> {
++    (0..count)
++        .map(|i| TestGuardian::new(scheme, seed_base + i))
++        .collect()
++}
++
++fn guardian_set(scheme: u8, threshold: u8, epoch: u64, members: &[TestGuardian]) -> GuardianSet {
++    GuardianSet {
++        scheme,
++        threshold,
++        bump: 0,
++        epoch,
++        created_slot: 0,
++        deployment_id: wire::deployment_id(DEPLOYMENT_LABEL),
++        keys: members.iter().map(TestGuardian::key).collect(),
++    }
++}
++
++struct Harness {
++    state: BridgeState,
++    sets: HashMap<u64, GuardianSet>,
++    members: HashMap<u64, Vec<TestGuardian>>,
++    minted: HashSet<u64>,
++    balances: HashMap<[u8; 32], u64>,
++    capitalization: u128,
++    receipts: Vec<BurnReceipt>,
++    records: Vec<MintRecord>,
++    epoch: u64,
++    slot: u64,
++    compute_units: u64,
++    compute_budget: u64,
++}
++
++impl Harness {
++    fn new(scheme: u8, count: u8, threshold: u8) -> Self {
++        let members = guardians(scheme, count, 1);
++        let set = guardian_set(scheme, threshold, 1, &members);
++        let state = BridgeState {
++            deployment_id: wire::deployment_id(DEPLOYMENT_LABEL),
++            guardian_epoch: 1,
++            source_decimals: DECIMALS,
++            network: NETWORK_MAINNET,
++            solana_genesis_hash: SOLANA_GENESIS,
++            source_program_id: SOURCE_PROGRAM,
++            source_mint: SOURCE_MINT,
++            max_mint_per_epoch: u64::MAX,
++            ..BridgeState::default()
++        };
++        let mut harness = Self {
++            state,
++            sets: HashMap::from([(1, set)]),
++            members: HashMap::from([(1, members)]),
++            minted: HashSet::new(),
++            balances: HashMap::new(),
++            capitalization: 1_000_000_000_000,
++            receipts: Vec::new(),
++            records: Vec::new(),
++            epoch: 5,
++            slot: 100,
++            compute_units: 0,
++            compute_budget: u64::MAX,
++        };
++        let signers: Vec<u8> = (0..threshold).collect();
++        harness
++            .govern(
++                &harness.governance_header(LATTICE_GENESIS),
++                &GovernanceAction::BindLatticeGenesis,
++                &signers,
++            )
++            .unwrap();
++        harness
++    }
++
++    fn current_set(&self) -> &GuardianSet {
++        &self.sets[&self.state.guardian_epoch]
++    }
++
++    fn header(&self, kind: u8, nonce: u64) -> Header {
++        Header {
++            kind,
++            protocol_version: wire::PROTOCOL_VERSION,
++            scheme: self.current_set().scheme,
++            deployment_id: self.state.deployment_id,
++            solana_genesis_hash: SOLANA_GENESIS,
++            lattice_genesis_hash: self.state.lattice_genesis_hash,
++            source_program_id: SOURCE_PROGRAM,
++            source_mint: SOURCE_MINT,
++            signer_epoch: self.state.guardian_epoch,
++            nonce,
++        }
++    }
++
++    fn governance_header(&self, lattice_genesis_hash: [u8; 32]) -> Header {
++        Header {
++            lattice_genesis_hash,
++            ..self.header(KIND_DESTINATION_GOVERNANCE, self.state.governance_sequence)
++        }
++    }
++
++    fn deposit(&self, sequence: u64, source_amount: u64, recipient: [u8; 32]) -> Transfer {
++        Transfer {
++            header: self.header(KIND_DEPOSIT, sequence),
++            source_amount,
++            native_amount: source_amount * SCALE,
++            recipient,
++            event_id: wire::deposit_event_id(&self.state.deployment_id, sequence),
++        }
++    }
++
++    /// Builds attestation account bytes signed by `signers` of the set at
++    /// `epoch`, then seals and verifies every entry.
++    fn attest_with(
++        &mut self,
++        epoch: u64,
++        message: &[u8],
++        signers: &[u8],
++    ) -> Result<(AttestationHeader, Vec<u8>), BridgeError> {
++        let scheme = self.sets[&epoch].scheme;
++        let digest = wire::digest(message);
++        let mut header = AttestationHeader {
++            scheme,
++            status: ATTESTATION_OPEN,
++            signature_count: signers.len() as u8,
++            verified_bitmap: 0,
++            signer_epoch: 0,
++            digest: [0; 32],
++            writer: [9; 32],
++            message_len: message.len() as u32,
++        };
++        let mut data = vec![0u8; ATTESTATION_HEADER_LEN];
++        data.extend_from_slice(message);
++        for index in signers {
++            data.extend_from_slice(
++                &self.members[&epoch][usize::from(*index)].sign(*index, &digest),
++            );
++        }
++        header.encode_into(&mut data);
++        let set = self.sets[&epoch].clone();
++        let budget = self.compute_budget;
++        let used = &mut self.compute_units;
++        let mut meter = |units: u64| -> Result<(), BridgeError> {
++            *used += units;
++            if *used > budget {
++                Err(BridgeError::Overflow)
++            } else {
++                Ok(())
++            }
++        };
++        logic::seal_and_verify(
++            &mut header,
++            &data,
++            &self.state,
++            &set,
++            0,
++            signers.len() as u8,
++            &mut meter,
++        )?;
++        Ok((header, data))
++    }
++
++    fn mint_message(&mut self, message: &[u8], signers: &[u8]) -> Result<u64, BridgeError> {
++        let (attestation, _) = self.attest_with(self.state.guardian_epoch, message, signers)?;
++        let mut state = self.state.clone();
++        let sequence = wire::parse_header(message)?.nonce;
++        let record = logic::process_mint(
++            &mut state,
++            self.current_set(),
++            &attestation,
++            message,
++            &[9; 32],
++            self.minted.contains(&sequence),
++            self.epoch,
++            self.slot,
++        )?;
++        self.state = state;
++        self.minted.insert(record.deposit_sequence);
++        *self.balances.entry(record.recipient).or_default() += record.native_amount;
++        self.capitalization += u128::from(record.native_amount);
++        self.records.push(record.clone());
++        Ok(record.native_amount)
++    }
++
++    fn mint(&mut self, transfer: &Transfer, signers: &[u8]) -> Result<u64, BridgeError> {
++        self.mint_message(&wire::encode_transfer(transfer), signers)
++    }
++
++    fn burn(
++        &mut self,
++        burner: [u8; 32],
++        native: u64,
++        recipient: [u8; 32],
++    ) -> Result<BurnReceipt, BridgeError> {
++        let balance = self.balances.get(&burner).copied().unwrap_or(0);
++        assert!(balance >= native, "system transfer would fail");
++        let mut state = self.state.clone();
++        let receipt = logic::process_burn(&mut state, &burner, native, &recipient, self.slot)?;
++        self.state = state;
++        *self.balances.get_mut(&burner).unwrap() -= native;
++        self.capitalization -= u128::from(native);
++        self.receipts.push(receipt.clone());
++        Ok(receipt)
++    }
++
++    fn govern(
++        &mut self,
++        header: &Header,
++        action: &GovernanceAction,
++        signers: &[u8],
++    ) -> Result<(), BridgeError> {
++        let message = wire::encode_governance(header, action);
++        let (attestation, _) = self.attest_with(self.state.guardian_epoch, &message, signers)?;
++        let mut state = self.state.clone();
++        let new_set = logic::process_governance(
++            &mut state,
++            self.current_set(),
++            &attestation,
++            &message,
++            &[9; 32],
++            self.slot,
++        )?;
++        self.state = state;
++        if let Some(set) = new_set {
++            self.sets.insert(set.epoch, set);
++        }
++        Ok(())
++    }
++
++    fn rotate(
++        &mut self,
++        scheme: u8,
++        count: u8,
++        threshold: u8,
++        signers: &[u8],
++    ) -> Result<(), BridgeError> {
++        let new_epoch = self.state.guardian_epoch + 1;
++        let members = guardians(scheme, count, (new_epoch as u8) * 40);
++        let keys = members.iter().map(TestGuardian::key).collect();
++        let action = GovernanceAction::RotateGuardians {
++            new_epoch,
++            threshold,
++            scheme,
++            keys,
++        };
++        let header = self.governance_header(self.state.lattice_genesis_hash);
++        self.govern(&header, &action, signers)?;
++        self.members.insert(new_epoch, members);
++        Ok(())
++    }
++
++    fn assert_supply_invariant(&self) {
++        let circulating: u128 = self.balances.values().map(|b| u128::from(*b)).sum();
++        assert_eq!(
++            self.state.outstanding_native,
++            self.state.total_minted_native - self.state.total_burned_native
++        );
++        assert_eq!(circulating, self.state.outstanding_native);
++        assert_eq!(
++            self.capitalization,
++            1_000_000_000_000 + self.state.total_minted_native - self.state.total_burned_native
++        );
++    }
++}
++
++const ALICE: [u8; 32] = [0xA1; 32];
++const BOB: [u8; 32] = [0xB0; 32];
++const SOLANA_WALLET: [u8; 32] = [0x5A; 32];
++
++#[test]
++fn mint_once_credits_exact_amount() {
++    let mut h = Harness::new(SCHEME_ED25519, 3, 2);
++    let deposit = h.deposit(0, 1_500_000, ALICE);
++    assert_eq!(h.mint(&deposit, &[0, 2]), Ok(1_500_000_000));
++    assert_eq!(h.balances[&ALICE], 1_500_000_000);
++    assert_eq!(h.state.total_minted_native, 1_500_000_000);
++    assert_eq!(h.state.minted_count, 1);
++    assert_eq!(h.records[0].event_id, deposit.event_id);
++    assert_eq!(h.records[0].slot, h.slot);
++    h.assert_supply_invariant();
++}
++
++#[test]
++fn replay_is_rejected() {
++    let mut h = Harness::new(SCHEME_ED25519, 3, 2);
++    let deposit = h.deposit(0, 10, ALICE);
++    h.mint(&deposit, &[0, 1]).unwrap();
++    // Same deposit, fresh attestation, different signer subset.
++    assert_eq!(
++        h.mint(&deposit, &[1, 2]),
++        Err(BridgeError::DepositAlreadyMinted)
++    );
++    // Same sequence re-signed with a different recipient/amount.
++    let conflicting = h.deposit(0, 99, BOB);
++    assert_eq!(
++        h.mint(&conflicting, &[0, 1, 2]),
++        Err(BridgeError::DepositAlreadyMinted)
++    );
++    assert_eq!(h.balances[&ALICE], 10 * SCALE);
++    assert!(!h.balances.contains_key(&BOB));
++    h.assert_supply_invariant();
++}
++
++#[test]
++fn below_threshold_is_rejected() {
++    let mut h = Harness::new(SCHEME_ED25519, 5, 3);
++    let deposit = h.deposit(0, 10, ALICE);
++    assert_eq!(h.mint(&deposit, &[0, 4]), Err(BridgeError::BelowThreshold));
++    // Repeating one guardian does not count twice.
++    assert_eq!(
++        h.mint(&deposit, &[1, 1, 1]),
++        Err(BridgeError::BelowThreshold)
++    );
++    assert_eq!(h.mint(&deposit, &[0, 2, 4]), Ok(10 * SCALE));
++}
++
++#[test]
++fn invalid_or_foreign_signatures_are_rejected() {
++    let mut h = Harness::new(SCHEME_ED25519, 3, 2);
++    let deposit = h.deposit(0, 10, ALICE);
++    let message = wire::encode_transfer(&deposit);
++    let (mut header, mut data) = h.attest_with(1, &message, &[0, 1]).unwrap();
++    // Flip a signature byte after sealing: re-verification fails.
++    let sig_start = ATTESTATION_HEADER_LEN + message.len() + 1;
++    data[sig_start] ^= 1;
++    header.verified_bitmap = 0;
++    let set = h.current_set().clone();
++    let mut meter = |_| Ok::<(), BridgeError>(());
++    assert_eq!(
++        logic::seal_and_verify(&mut header, &data, &h.state, &set, 0, 2, &mut meter),
++        Err(BridgeError::InvalidSignature)
++    );
++    // Index outside the set.
++    let digest = wire::digest(&message);
++    let mut entry = h.members[&1][0].sign(0, &digest);
++    entry[0] = 7;
++    assert_eq!(
++        guardian::verify_entries::<BridgeError, _>(&set, &digest, &entry, 0, 1, &mut meter),
++        Err(BridgeError::InvalidGuardianIndex)
++    );
++    // A non-guardian key.
++    let outsider = TestGuardian::new(SCHEME_ED25519, 200).sign(0, &digest);
++    assert_eq!(
++        guardian::verify_entries::<BridgeError, _>(&set, &digest, &outsider, 0, 1, &mut meter),
++        Err(BridgeError::InvalidSignature)
++    );
++}
++
++#[test]
++fn wrong_domain_genesis_epoch_and_fields_are_rejected() {
++    let mut h = Harness::new(SCHEME_ED25519, 3, 2);
++    let base = h.deposit(0, 10, ALICE);
++    let cases: Vec<(Box<dyn Fn(&mut Transfer)>, BridgeError)> = vec![
++        (
++            Box::new(|t| t.header.kind = wire::KIND_WITHDRAWAL),
++            BridgeError::WrongKind,
++        ),
++        (
++            Box::new(|t| t.header.protocol_version = 2),
++            BridgeError::WrongProtocolVersion,
++        ),
++        (
++            Box::new(|t| t.header.deployment_id = [0xEE; 32]),
++            BridgeError::WrongDeployment,
++        ),
++        (
++            Box::new(|t| t.header.solana_genesis_hash = [0xEE; 32]),
++            BridgeError::WrongSolanaGenesis,
++        ),
++        (
++            Box::new(|t| t.header.lattice_genesis_hash = [0xEE; 32]),
++            BridgeError::WrongLatticeGenesis,
++        ),
++        (
++            Box::new(|t| t.header.source_program_id = [0xEE; 32]),
++            BridgeError::WrongSourceProgram,
++        ),
++        (
++            Box::new(|t| t.header.source_mint = [0xEE; 32]),
++            BridgeError::WrongSourceMint,
++        ),
++        (
++            Box::new(|t| t.header.signer_epoch = 2),
++            BridgeError::WrongSignerEpoch,
++        ),
++        (
++            Box::new(|t| t.event_id = [0xEE; 32]),
++            BridgeError::WrongEventId,
++        ),
++        (
++            Box::new(|t| t.native_amount += 1),
++            BridgeError::AmountMismatch,
++        ),
++        (
++            Box::new(|t| t.recipient = [0; 32]),
++            BridgeError::ZeroRecipient,
++        ),
++        (
++            Box::new(|t| {
++                t.source_amount = 0;
++                t.native_amount = 0;
++            }),
++            BridgeError::ZeroAmount,
++        ),
++    ];
++    for (mutate, expected) in cases {
++        let mut transfer = base;
++        mutate(&mut transfer);
++        let message = wire::encode_transfer(&transfer);
++        let result = h.mint_message(&message, &[0, 1]);
++        // Deployment and kind are already rejected while sealing; everything
++        // else is rejected by the deposit checks after a valid threshold.
++        assert_eq!(result, Err(expected), "case {expected:?}");
++    }
++    // Wrong domain bytes.
++    let mut message = wire::encode_transfer(&base);
++    message[..16].copy_from_slice(b"lattice-bridge/2");
++    assert_eq!(
++        h.mint_message(&message, &[0, 1]),
++        Err(BridgeError::WrongDomain)
++    );
++    // Wrong scheme byte (the set is Ed25519).
++    let mut transfer = base;
++    transfer.header.scheme = SCHEME_MLDSA65;
++    assert_eq!(
++        h.mint_message(&wire::encode_transfer(&transfer), &[0, 1]),
++        Err(BridgeError::WrongScheme)
++    );
++    assert_eq!(h.mint(&base, &[0, 1]), Ok(10 * SCALE));
++    h.assert_supply_invariant();
++}
++
++#[test]
++fn deposits_require_bound_lattice_genesis() {
++    let mut h = Harness::new(SCHEME_ED25519, 3, 2);
++    h.state.set_flag(FLAG_LATTICE_GENESIS_BOUND, false);
++    let deposit = h.deposit(0, 10, ALICE);
++    assert_eq!(
++        h.mint(&deposit, &[0, 1]),
++        Err(BridgeError::LatticeGenesisNotBound)
++    );
++    h.state.set_flag(FLAG_LATTICE_GENESIS_BOUND, true);
++    // Binding is one-shot.
++    let header = h.governance_header([0x99; 32]);
++    assert_eq!(
++        h.govern(&header, &GovernanceAction::BindLatticeGenesis, &[0, 1]),
++        Err(BridgeError::LatticeGenesisAlreadyBound)
++    );
++    assert_eq!(h.state.lattice_genesis_hash, LATTICE_GENESIS);
++}
++
++#[test]
++fn rotation_requires_current_threshold_and_retires_old_set() {
++    let mut h = Harness::new(SCHEME_ED25519, 3, 2);
++    let pending = h.deposit(0, 10, ALICE);
++    let old_message = wire::encode_transfer(&pending);
++    let (old_attestation, _) = h.attest_with(1, &old_message, &[0, 1]).unwrap();
++
++    assert_eq!(
++        h.rotate(SCHEME_ED25519, 4, 3, &[0]),
++        Err(BridgeError::BelowThreshold)
++    );
++    h.rotate(SCHEME_ED25519, 4, 3, &[1, 2]).unwrap();
++    assert_eq!(h.state.guardian_epoch, 2);
++    assert_eq!(h.sets[&2].threshold, 3);
++
++    // A threshold attestation made under epoch 1 is no longer accepted.
++    let mut state = h.state.clone();
++    assert_eq!(
++        logic::process_mint(
++            &mut state,
++            h.current_set(),
++            &old_attestation,
++            &old_message,
++            &[9; 32],
++            false,
++            h.epoch,
++            h.slot
++        ),
++        Err(BridgeError::WrongSignerEpoch)
++    );
++    // Old guardians cannot sign for the new epoch.
++    let resigned = h.deposit(0, 10, ALICE);
++    let message = wire::encode_transfer(&resigned);
++    let old_set = h.sets[&1].clone();
++    let digest = wire::digest(&message);
++    let entry = h.members[&1][0].sign(0, &digest);
++    let mut meter = |_| Ok::<(), BridgeError>(());
++    assert_eq!(
++        guardian::verify_entries::<BridgeError, _>(
++            h.current_set(),
++            &digest,
++            &entry,
++            0,
++            1,
++            &mut meter
++        ),
++        Err(BridgeError::InvalidSignature)
++    );
++    assert!(
++        guardian::verify_entries::<BridgeError, _>(&old_set, &digest, &entry, 0, 1, &mut meter)
++            .is_ok()
++    );
++    // The new set mints the re-signed deposit.
++    assert_eq!(h.mint(&resigned, &[0, 1, 3]), Ok(10 * SCALE));
++    // Rotation must go to exactly current + 1, and governance nonces are single-use.
++    let header = h.governance_header(LATTICE_GENESIS);
++    let bad = GovernanceAction::RotateGuardians {
++        new_epoch: 9,
++        threshold: 2,
++        scheme: SCHEME_ED25519,
++        keys: h.sets[&2].keys[..3].to_vec(),
++    };
++    assert_eq!(
++        h.govern(&header, &bad, &[0, 1, 2]),
++        Err(BridgeError::WrongNewEpoch)
++    );
++    let stale = Header { nonce: 0, ..header };
++    assert_eq!(
++        h.govern(
++            &stale,
++            &GovernanceAction::SetLimits {
++                max_mint_per_epoch: 1
++            },
++            &[0, 1, 2]
++        ),
++        Err(BridgeError::WrongNonce)
++    );
++    // An invalid new set (threshold not a strict majority) is rejected.
++    assert_eq!(
++        h.rotate(SCHEME_ED25519, 4, 2, &[0, 1, 2]),
++        Err(BridgeError::InvalidGuardianSet)
++    );
++}
++
++#[test]
++fn separate_pauses_pauser_and_unpause() {
++    let mut h = Harness::new(SCHEME_ED25519, 3, 2);
++    h.mint(&h.deposit(0, 100, ALICE), &[0, 1]).unwrap();
++
++    let header = h.governance_header(LATTICE_GENESIS);
++    h.govern(
++        &header,
++        &GovernanceAction::SetPause {
++            deposits_paused: true,
++            withdrawals_paused: false,
++        },
++        &[0, 1],
++    )
++    .unwrap();
++    assert_eq!(
++        h.mint(&h.deposit(1, 1, ALICE), &[0, 1]),
++        Err(BridgeError::DepositsPaused)
++    );
++    // Withdrawals still work while deposits are paused.
++    h.burn(ALICE, 10 * SCALE, SOLANA_WALLET).unwrap();
++
++    let header = h.governance_header(LATTICE_GENESIS);
++    h.govern(
++        &header,
++        &GovernanceAction::SetPause {
++            deposits_paused: false,
++            withdrawals_paused: true,
++        },
++        &[1, 2],
++    )
++    .unwrap();
++    assert_eq!(
++        h.burn(ALICE, SCALE, SOLANA_WALLET),
++        Err(BridgeError::WithdrawalsPaused)
++    );
++    assert_eq!(h.mint(&h.deposit(1, 1, ALICE), &[0, 1]), Ok(SCALE));
++
++    // Pauser key: can pause, cannot unpause; nobody else can use it.
++    let header = h.governance_header(LATTICE_GENESIS);
++    h.govern(
++        &header,
++        &GovernanceAction::SetPauser { pauser: [0x77; 32] },
++        &[0, 2],
++    )
++    .unwrap();
++    assert_eq!(
++        logic::process_pauser_pause(&mut h.state, &[0x78; 32], 1, 0),
++        Err(BridgeError::NotPauser)
++    );
++    logic::process_pauser_pause(&mut h.state, &[0x77; 32], 1, 0).unwrap();
++    assert!(h.state.is_flag(FLAG_DEPOSITS_PAUSED) && h.state.is_flag(FLAG_WITHDRAWALS_PAUSED));
++    assert_eq!(
++        logic::process_pauser_pause(&mut h.state, &[0x77; 32], 2, 0),
++        Err(BridgeError::UnpauseNotAllowed)
++    );
++    logic::process_pauser_pause(&mut h.state, &[0x77; 32], 0, 0).unwrap();
++    assert!(h.state.is_flag(FLAG_DEPOSITS_PAUSED) && h.state.is_flag(FLAG_WITHDRAWALS_PAUSED));
++    h.assert_supply_invariant();
++}
++
++#[test]
++fn per_epoch_rate_limit() {
++    let mut h = Harness::new(SCHEME_ED25519, 3, 2);
++    let header = h.governance_header(LATTICE_GENESIS);
++    h.govern(
++        &header,
++        &GovernanceAction::SetLimits {
++            max_mint_per_epoch: 100 * SCALE,
++        },
++        &[0, 1],
++    )
++    .unwrap();
++    h.mint(&h.deposit(0, 60, ALICE), &[0, 1]).unwrap();
++    assert_eq!(
++        h.mint(&h.deposit(1, 41, ALICE), &[0, 1]),
++        Err(BridgeError::MintRateLimitExceeded)
++    );
++    h.mint(&h.deposit(1, 40, ALICE), &[0, 1]).unwrap();
++    assert_eq!(
++        h.mint(&h.deposit(2, 1, ALICE), &[0, 1]),
++        Err(BridgeError::MintRateLimitExceeded)
++    );
++    // A rejected deposit stays mintable later: next epoch resets the window.
++    h.epoch += 1;
++    assert_eq!(h.mint(&h.deposit(2, 1, ALICE), &[0, 1]), Ok(SCALE));
++    assert_eq!(h.state.minted_in_rate_epoch, SCALE);
++    // Zero limit disables minting entirely (there is no admin mint path).
++    let header = h.governance_header(LATTICE_GENESIS);
++    h.govern(
++        &header,
++        &GovernanceAction::SetLimits {
++            max_mint_per_epoch: 0,
++        },
++        &[0, 1],
++    )
++    .unwrap();
++    h.epoch += 1;
++    assert_eq!(
++        h.mint(&h.deposit(3, 1, ALICE), &[0, 1]),
++        Err(BridgeError::MintRateLimitExceeded)
++    );
++}
++
++#[test]
++fn burn_reduces_capitalization_and_creates_receipts() {
++    let mut h = Harness::new(SCHEME_ED25519, 3, 2);
++    h.mint(&h.deposit(0, 5_000, ALICE), &[0, 1]).unwrap();
++    let cap_before = h.capitalization;
++
++    let first = h.burn(ALICE, 1_234 * SCALE, SOLANA_WALLET).unwrap();
++    assert_eq!(h.capitalization, cap_before - u128::from(1_234 * SCALE));
++    assert_eq!(first.burn_sequence, 0);
++    assert_eq!(first.source_amount, 1_234);
++    assert_eq!(first.native_amount, 1_234 * SCALE);
++    assert_eq!(first.burner, ALICE);
++    assert_eq!(first.solana_recipient, SOLANA_WALLET);
++    assert_eq!(
++        first.event_id,
++        wire::burn_event_id(&h.state.deployment_id, 0)
++    );
++    assert_eq!(BurnReceipt::decode(&first.encode()), Ok(first.clone()));
++
++    let second = h.burn(ALICE, SCALE, SOLANA_WALLET).unwrap();
++    assert_eq!(second.burn_sequence, 1);
++    assert_eq!(h.state.next_burn_sequence, 2);
++    assert_eq!(h.state.total_burned_native, u128::from(1_235 * SCALE));
++
++    assert_eq!(
++        h.burn(ALICE, SCALE + 1, SOLANA_WALLET),
++        Err(BridgeError::NotMultipleOfScale)
++    );
++    assert_eq!(
++        h.burn(ALICE, 0, SOLANA_WALLET),
++        Err(BridgeError::ZeroAmount)
++    );
++    assert_eq!(
++        h.burn(ALICE, SCALE, [0; 32]),
++        Err(BridgeError::ZeroRecipient)
++    );
++    assert_eq!(
++        h.state.next_burn_sequence, 2,
++        "failed burns consume no sequence"
++    );
++    h.assert_supply_invariant();
++}
++
++#[test]
++fn burn_cannot_exceed_outstanding_bridge_supply() {
++    let mut h = Harness::new(SCHEME_ED25519, 3, 2);
++    h.mint(&h.deposit(0, 1, ALICE), &[0, 1]).unwrap();
++    // LAT that never came through the bridge (e.g. a non-bridge balance).
++    h.balances.insert(BOB, 10 * SCALE);
++    assert_eq!(
++        h.burn(BOB, 2 * SCALE, SOLANA_WALLET),
++        Err(BridgeError::BurnExceedsOutstanding)
++    );
++}
++
++#[test]
++fn overflow_is_rejected_not_wrapped() {
++    let mut h = Harness::new(SCHEME_ED25519, 3, 2);
++    assert_eq!(
++        conversion::source_to_native(u64::MAX / SCALE + 1, DECIMALS),
++        Err(BridgeError::Overflow)
++    );
++
++    let mut state = h.state.clone();
++    state.minted_in_rate_epoch = u64::MAX;
++    state.rate_limit_epoch = h.epoch;
++    assert_eq!(
++        logic::apply_mint(&mut state, 1, h.epoch, 0),
++        Err(BridgeError::Overflow)
++    );
++
++    let mut state = h.state.clone();
++    state.total_minted_native = u128::MAX;
++    assert_eq!(
++        logic::apply_mint(&mut state, 1, h.epoch, 0),
++        Err(BridgeError::Overflow)
++    );
++
++    let mut state = h.state.clone();
++    state.outstanding_native = u128::MAX;
++    assert_eq!(
++        logic::apply_mint(&mut state, 1, h.epoch, 0),
++        Err(BridgeError::Overflow)
++    );
++
++    let mut state = h.state.clone();
++    state.outstanding_native = u128::from(SCALE);
++    state.next_burn_sequence = u64::MAX;
++    assert_eq!(
++        logic::process_burn(&mut state, &ALICE, SCALE, &SOLANA_WALLET, 0),
++        Err(BridgeError::Overflow)
++    );
++
++    // A failed mint leaves the state untouched.
++    h.state.total_minted_native = u128::MAX;
++    let before = h.state.clone();
++    assert_eq!(
++        h.mint(&h.deposit(0, 1, ALICE), &[0, 1]),
++        Err(BridgeError::Overflow)
++    );
++    assert_eq!(h.state, before);
++}
++
++#[test]
++fn mldsa65_only_guardians() {
++    let mut h = Harness::new(SCHEME_MLDSA65, 3, 2);
++    let deposit = h.deposit(0, 7, ALICE);
++    let before = h.compute_units;
++    assert_eq!(h.mint(&deposit, &[0, 2]), Ok(7 * SCALE));
++    assert_eq!(
++        h.compute_units - before,
++        logic::digest_cost(wire::TRANSFER_LEN) + 2 * guardian::mldsa65_verify_cost()
++    );
++    h.assert_supply_invariant();
++}
++
++#[test]
++fn hybrid_requires_both_signatures_per_guardian() {
++    let mut h = Harness::new(SCHEME_HYBRID, 3, 2);
++    let deposit = h.deposit(0, 3, ALICE);
++    let message = wire::encode_transfer(&deposit);
++    let digest = wire::digest(&message);
++    let set = h.current_set().clone();
++    let mut meter = |_| Ok::<(), BridgeError>(());
++
++    let good = h.members[&1][1].sign(1, &digest);
++    assert_eq!(good.len(), 1 + 64 + 3309);
++    assert_eq!(
++        guardian::verify_entries::<BridgeError, _>(&set, &digest, &good, 0, 1, &mut meter),
++        Ok(0b10)
++    );
++
++    let mut bad_ed = good.clone();
++    bad_ed[1] ^= 1;
++    assert_eq!(
++        guardian::verify_entries::<BridgeError, _>(&set, &digest, &bad_ed, 0, 1, &mut meter),
++        Err(BridgeError::InvalidSignature)
++    );
++    let mut bad_pq = good.clone();
++    bad_pq[100] ^= 1;
++    assert_eq!(
++        guardian::verify_entries::<BridgeError, _>(&set, &digest, &bad_pq, 0, 1, &mut meter),
++        Err(BridgeError::InvalidSignature)
++    );
++    // Ed25519 half from guardian 1, ML-DSA half from guardian 2: rejected.
++    let other = h.members[&1][2].sign(1, &digest);
++    let mut mixed = good[..65].to_vec();
++    mixed.extend_from_slice(&other[65..]);
++    assert_eq!(
++        guardian::verify_entries::<BridgeError, _>(&set, &digest, &mixed, 0, 1, &mut meter),
++        Err(BridgeError::InvalidSignature)
++    );
++    let before = h.compute_units;
++    assert_eq!(h.mint(&deposit, &[0, 1]), Ok(3 * SCALE));
++    assert_eq!(
++        h.compute_units - before,
++        logic::digest_cost(wire::TRANSFER_LEN)
++            + 2 * (guardian::ED25519_VERIFY_COST + guardian::mldsa65_verify_cost())
++    );
++}
++
++#[test]
++fn scheme_migration_ed25519_to_hybrid_via_rotation() {
++    let mut h = Harness::new(SCHEME_ED25519, 3, 2);
++    h.rotate(SCHEME_HYBRID, 3, 2, &[0, 1]).unwrap();
++    assert_eq!(h.current_set().scheme, SCHEME_HYBRID);
++    let deposit = h.deposit(0, 1, ALICE);
++    assert_eq!(deposit.header.scheme, SCHEME_HYBRID);
++    assert_eq!(h.mint(&deposit, &[1, 2]), Ok(SCALE));
++}
++
++#[test]
++fn compute_budget_exhaustion_stops_verification() {
++    let mut h = Harness::new(SCHEME_ED25519, 3, 2);
++    h.compute_units = 0;
++    h.compute_budget = logic::digest_cost(wire::TRANSFER_LEN) + guardian::ED25519_VERIFY_COST;
++    let deposit = h.deposit(0, 1, ALICE);
++    assert_eq!(h.mint(&deposit, &[0, 1]), Err(BridgeError::Overflow));
++    assert!(h.minted.is_empty());
++}
++
++#[test]
++fn attestation_header_round_trip_and_bounds() {
++    let mut h = Harness::new(SCHEME_ED25519, 3, 2);
++    let message = wire::encode_transfer(&h.deposit(0, 1, ALICE));
++    let (header, data) = h.attest_with(1, &message, &[0, 1]).unwrap();
++    let mut encoded = data.clone();
++    header.encode_into(&mut encoded);
++    assert_eq!(AttestationHeader::decode(&encoded), Ok(header.clone()));
++    assert_eq!(header.message(&encoded).unwrap(), message.as_slice());
++    // Verifying past the declared signature count is rejected.
++    let mut sealed = header.clone();
++    let set = h.current_set().clone();
++    let mut meter = |_| Ok::<(), BridgeError>(());
++    assert_eq!(
++        logic::seal_and_verify(&mut sealed, &encoded, &h.state, &set, 1, 2, &mut meter),
++        Err(BridgeError::AttestationOutOfBounds)
++    );
++    // Consuming requires the writer.
++    let mut state = h.state.clone();
++    assert_eq!(
++        logic::process_mint(
++            &mut state, &set, &header, &message, &[8; 32], false, h.epoch, h.slot
++        ),
++        Err(BridgeError::AttestationWriter)
++    );
++}
++
++fn genesis_config(network: u8, bootstrap: Vec<BootstrapDeposit>) -> GenesisBridgeConfig {
++    let members = guardians(SCHEME_ED25519, 3, 1);
++    GenesisBridgeConfig {
++        network,
++        deployment_id: wire::deployment_id(DEPLOYMENT_LABEL),
++        solana_genesis_hash: SOLANA_GENESIS,
++        source_program_id: SOURCE_PROGRAM,
++        source_mint: SOURCE_MINT,
++        source_decimals: DECIMALS,
++        guardian_set: guardian_set(SCHEME_ED25519, 2, 1, &members),
++        pauser: [0; 32],
++        max_mint_per_epoch: 1_000_000 * SCALE,
++        bootstrap_deposits: bootstrap,
++    }
++}
++
++#[test]
++fn mainnet_genesis_rejects_unbacked_lamports() {
++    let rent = |len: usize| 1_000 + len as u64;
++    let program_id = crate::id();
++    let err = genesis::build_genesis_accounts(
++        &genesis_config(NETWORK_MAINNET, vec![]),
++        &program_id,
++        500,
++        0,
++        rent,
++    )
++    .unwrap_err();
++    assert!(err.contains("unbacked"), "{err}");
++
++    let bootstrap = vec![BootstrapDeposit {
++        sequence: 0,
++        source_amount: 1_000_000,
++        recipient: ALICE,
++    }];
++    let (accounts, report) = genesis::build_genesis_accounts(
++        &genesis_config(NETWORK_MAINNET, bootstrap.clone()),
++        &program_id,
++        500_000,
++        1_000_000,
++        rent,
++    )
++    .unwrap();
++    assert_eq!(report.backed_native, 1_000_000 * SCALE);
++    assert_eq!(report.unbacked_native, 0);
++    let state_account = accounts
++        .iter()
++        .find(|a| a.data.starts_with(state::STATE_MAGIC))
++        .unwrap();
++    let state = BridgeState::decode(&state_account.data).unwrap();
++    assert_eq!(state.genesis_unbacked_native, 0);
++    assert_eq!(state.total_minted_native, u128::from(1_000_000 * SCALE));
++    assert_eq!(state.outstanding_native, u128::from(1_000_000 * SCALE));
++    assert_eq!(state.minted_count, 1);
++    assert!(!state.is_flag(FLAG_LATTICE_GENESIS_BOUND));
++    assert!(!state.is_flag(FLAG_DEPOSITS_PAUSED) && !state.is_flag(FLAG_WITHDRAWALS_PAUSED));
++    assert_eq!(
++        state_account.address,
++        state::state_address(&program_id, &state.deployment_id).0
++    );
++    // The bootstrap deposit is pre-consumed at its deterministic address.
++    let record_address = state::mint_record_address(&program_id, &state.deployment_id, 0).0;
++    let record = accounts
++        .iter()
++        .find(|a| a.address == record_address)
++        .unwrap();
++    assert_eq!(
++        MintRecord::decode(&record.data).unwrap().native_amount,
++        1_000_000 * SCALE
++    );
++    let set_address = state::guardian_set_address(&program_id, &state.deployment_id, 1).0;
++    assert!(accounts.iter().any(|a| a.address == set_address));
++
++    // Too little backing for the genesis allocation plus runtime reserve.
++    let err = genesis::build_genesis_accounts(
++        &genesis_config(NETWORK_MAINNET, bootstrap.clone()),
++        &program_id,
++        1_000_000 * SCALE,
++        1,
++        rent,
++    )
++    .unwrap_err();
++    assert!(err.contains("unbacked"), "{err}");
++    // Duplicate bootstrap sequences are refused.
++    let dup = vec![bootstrap[0].clone(), bootstrap[0].clone()];
++    assert!(
++        genesis::build_genesis_accounts(
++            &genesis_config(NETWORK_MAINNET, dup),
++            &program_id,
++            0,
++            0,
++            rent
++        )
++        .is_err()
++    );
++}
++
++#[test]
++fn testnet_genesis_labels_unbacked_supply() {
++    let rent = |len: usize| 1_000 + len as u64;
++    let (accounts, report) = genesis::build_genesis_accounts(
++        &genesis_config(NETWORK_TESTNET, vec![]),
++        &crate::id(),
++        500_000_000 * 1_000_000_000,
++        1_000,
++        rent,
++    )
++    .unwrap();
++    assert!(report.unbacked_native > 500_000_000 * 1_000_000_000);
++    let state_account = accounts
++        .iter()
++        .find(|a| a.data.starts_with(state::STATE_MAGIC))
++        .unwrap();
++    let state = BridgeState::decode(&state_account.data).unwrap();
++    assert_eq!(state.network, NETWORK_TESTNET);
++    assert_eq!(state.genesis_unbacked_native, report.unbacked_native);
++    assert_eq!(state.total_minted_native, 0);
++}
++
++#[test]
++fn withdrawals_paused_flag_constant_is_distinct() {
++    assert_ne!(FLAG_DEPOSITS_PAUSED, FLAG_WITHDRAWALS_PAUSED);
++    assert_ne!(FLAG_WITHDRAWALS_PAUSED, FLAG_LATTICE_GENESIS_BOUND);
++}
+diff --git a/programs/lattice-bridge/src/wire.rs b/programs/lattice-bridge/src/wire.rs
+new file mode 100644
+index 000000000..ad48ea7f6
+--- /dev/null
++++ b/programs/lattice-bridge/src/wire.rs
+@@ -0,0 +1,472 @@
++//! Canonical bridge messages, wire version 1 (docs/BRIDGE_SPEC.md §2–§3).
++//!
++//! Byte-for-byte identical to `programs/source-vault/src/message.rs`. Kind 4
++//! (DESTINATION_GOVERNANCE) bodies are defined here for the Lattice registry
++//! and documented in docs/NATIVE_ISSUANCE.md.
++
++use {
++    crate::error::{BridgeError, BridgeResult},
++    agave_mldsa_verify::MLDSA65_PUBLIC_KEY_LEN,
++    solana_sha256_hasher::hashv,
++};
++
++pub const DOMAIN: &[u8; 16] = b"lattice-bridge/1";
++pub const PROTOCOL_VERSION: u8 = 1;
++
++pub const KIND_DEPOSIT: u8 = 1;
++pub const KIND_WITHDRAWAL: u8 = 2;
++pub const KIND_SOURCE_GOVERNANCE: u8 = 3;
++pub const KIND_DESTINATION_GOVERNANCE: u8 = 4;
++
++pub const SCHEME_ED25519: u8 = 1;
++pub const SCHEME_MLDSA65: u8 = 2;
++pub const SCHEME_HYBRID: u8 = 3;
++
++pub const HEADER_LEN: usize = 196;
++pub const TRANSFER_LEN: usize = 276;
++
++pub const DEPLOYMENT_TAG: &[u8] = b"lattice-bridge/1:deployment";
++pub const DEPOSIT_EVENT_TAG: &[u8] = b"lattice-bridge/1:deposit-event";
++pub const BURN_EVENT_TAG: &[u8] = b"lattice-bridge/1:burn-event";
++
++/// Destination governance actions (kind 4).
++pub const ACTION_ROTATE_GUARDIANS: u8 = 1;
++pub const ACTION_SET_PAUSE: u8 = 2;
++pub const ACTION_SET_LIMITS: u8 = 3;
++pub const ACTION_SET_PAUSER: u8 = 4;
++pub const ACTION_BIND_LATTICE_GENESIS: u8 = 5;
++
++pub const MAX_GUARDIANS: usize = 19;
++pub const ED25519_PUBLIC_KEY_LEN: usize = 32;
++/// Largest valid message: a hybrid RotateGuardians with 19 guardians.
++pub const MAX_MESSAGE_LEN: usize =
++    HEADER_LEN + 12 + MAX_GUARDIANS * (ED25519_PUBLIC_KEY_LEN + MLDSA65_PUBLIC_KEY_LEN);
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct Header {
++    pub kind: u8,
++    pub protocol_version: u8,
++    pub scheme: u8,
++    pub deployment_id: [u8; 32],
++    pub solana_genesis_hash: [u8; 32],
++    pub lattice_genesis_hash: [u8; 32],
++    pub source_program_id: [u8; 32],
++    pub source_mint: [u8; 32],
++    pub signer_epoch: u64,
++    pub nonce: u64,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct Transfer {
++    pub header: Header,
++    pub source_amount: u64,
++    pub native_amount: u64,
++    pub recipient: [u8; 32],
++    pub event_id: [u8; 32],
++}
++
++/// One guardian's keys; which halves are present depends on the scheme.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct GuardianKey {
++    pub ed25519: Option<[u8; ED25519_PUBLIC_KEY_LEN]>,
++    pub mldsa65: Option<Vec<u8>>,
++}
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub enum GovernanceAction {
++    RotateGuardians {
++        new_epoch: u64,
++        threshold: u8,
++        scheme: u8,
++        keys: Vec<GuardianKey>,
++    },
++    SetPause {
++        deposits_paused: bool,
++        withdrawals_paused: bool,
++    },
++    SetLimits {
++        max_mint_per_epoch: u64,
++    },
++    SetPauser {
++        pauser: [u8; 32],
++    },
++    BindLatticeGenesis,
++}
++
++pub(crate) fn a32(d: &[u8], o: usize) -> BridgeResult<[u8; 32]> {
++    d.get(o..o.checked_add(32).ok_or(BridgeError::MalformedMessage)?)
++        .and_then(|s| <[u8; 32]>::try_from(s).ok())
++        .ok_or(BridgeError::MalformedMessage)
++}
++
++pub(crate) fn u64_at(d: &[u8], o: usize) -> BridgeResult<u64> {
++    d.get(o..o.checked_add(8).ok_or(BridgeError::MalformedMessage)?)
++        .and_then(|s| <[u8; 8]>::try_from(s).ok())
++        .map(u64::from_le_bytes)
++        .ok_or(BridgeError::MalformedMessage)
++}
++
++pub(crate) fn u8_at(d: &[u8], o: usize) -> BridgeResult<u8> {
++    d.get(o).copied().ok_or(BridgeError::MalformedMessage)
++}
++
++pub fn parse_header(d: &[u8]) -> BridgeResult<Header> {
++    if d.len() < HEADER_LEN {
++        return Err(BridgeError::MalformedMessage);
++    }
++    if d.get(0..16) != Some(DOMAIN.as_slice()) {
++        return Err(BridgeError::WrongDomain);
++    }
++    if u8_at(d, 19)? != 0 {
++        return Err(BridgeError::MalformedMessage);
++    }
++    Ok(Header {
++        kind: u8_at(d, 16)?,
++        protocol_version: u8_at(d, 17)?,
++        scheme: u8_at(d, 18)?,
++        deployment_id: a32(d, 20)?,
++        solana_genesis_hash: a32(d, 52)?,
++        lattice_genesis_hash: a32(d, 84)?,
++        source_program_id: a32(d, 116)?,
++        source_mint: a32(d, 148)?,
++        signer_epoch: u64_at(d, 180)?,
++        nonce: u64_at(d, 188)?,
++    })
++}
++
++pub fn parse_transfer(d: &[u8]) -> BridgeResult<Transfer> {
++    if d.len() != TRANSFER_LEN {
++        return Err(BridgeError::MalformedMessage);
++    }
++    Ok(Transfer {
++        header: parse_header(d)?,
++        source_amount: u64_at(d, 196)?,
++        native_amount: u64_at(d, 204)?,
++        recipient: a32(d, 212)?,
++        event_id: a32(d, 244)?,
++    })
++}
++
++pub fn encode_header(h: &Header, out: &mut Vec<u8>) {
++    out.extend_from_slice(DOMAIN);
++    out.extend_from_slice(&[h.kind, h.protocol_version, h.scheme, 0]);
++    out.extend_from_slice(&h.deployment_id);
++    out.extend_from_slice(&h.solana_genesis_hash);
++    out.extend_from_slice(&h.lattice_genesis_hash);
++    out.extend_from_slice(&h.source_program_id);
++    out.extend_from_slice(&h.source_mint);
++    out.extend_from_slice(&h.signer_epoch.to_le_bytes());
++    out.extend_from_slice(&h.nonce.to_le_bytes());
++}
++
++pub fn encode_transfer(t: &Transfer) -> Vec<u8> {
++    let mut out = Vec::with_capacity(TRANSFER_LEN);
++    encode_header(&t.header, &mut out);
++    out.extend_from_slice(&t.source_amount.to_le_bytes());
++    out.extend_from_slice(&t.native_amount.to_le_bytes());
++    out.extend_from_slice(&t.recipient);
++    out.extend_from_slice(&t.event_id);
++    out
++}
++
++/// Bytes of one guardian key entry for `scheme` (ed25519 first, then ML-DSA).
++pub fn key_entry_len(scheme: u8) -> BridgeResult<usize> {
++    match scheme {
++        SCHEME_ED25519 => Ok(ED25519_PUBLIC_KEY_LEN),
++        SCHEME_MLDSA65 => Ok(MLDSA65_PUBLIC_KEY_LEN),
++        SCHEME_HYBRID => Ok(ED25519_PUBLIC_KEY_LEN + MLDSA65_PUBLIC_KEY_LEN),
++        _ => Err(BridgeError::WrongScheme),
++    }
++}
++
++pub fn scheme_has_ed25519(scheme: u8) -> bool {
++    scheme == SCHEME_ED25519 || scheme == SCHEME_HYBRID
++}
++
++pub fn scheme_has_mldsa65(scheme: u8) -> bool {
++    scheme == SCHEME_MLDSA65 || scheme == SCHEME_HYBRID
++}
++
++pub fn encode_key_entry(key: &GuardianKey, out: &mut Vec<u8>) {
++    if let Some(ed) = &key.ed25519 {
++        out.extend_from_slice(ed);
++    }
++    if let Some(pq) = &key.mldsa65 {
++        out.extend_from_slice(pq);
++    }
++}
++
++pub fn parse_key_entry(scheme: u8, d: &[u8]) -> BridgeResult<GuardianKey> {
++    if d.len() != key_entry_len(scheme)? {
++        return Err(BridgeError::MalformedMessage);
++    }
++    let ed25519 = if scheme_has_ed25519(scheme) {
++        Some(a32(d, 0)?)
++    } else {
++        None
++    };
++    let mldsa65 = if scheme_has_mldsa65(scheme) {
++        let start = if ed25519.is_some() {
++            ED25519_PUBLIC_KEY_LEN
++        } else {
++            0
++        };
++        Some(
++            d.get(start..)
++                .ok_or(BridgeError::MalformedMessage)?
++                .to_vec(),
++        )
++    } else {
++        None
++    };
++    Ok(GuardianKey { ed25519, mldsa65 })
++}
++
++/// Encodes a kind-4 body (`action || payload`), appended after the header.
++pub fn encode_governance_body(action: &GovernanceAction, out: &mut Vec<u8>) {
++    match action {
++        GovernanceAction::RotateGuardians {
++            new_epoch,
++            threshold,
++            scheme,
++            keys,
++        } => {
++            out.push(ACTION_ROTATE_GUARDIANS);
++            out.extend_from_slice(&new_epoch.to_le_bytes());
++            out.push(*threshold);
++            out.push(keys.len() as u8);
++            out.push(*scheme);
++            for key in keys {
++                encode_key_entry(key, out);
++            }
++        }
++        GovernanceAction::SetPause {
++            deposits_paused,
++            withdrawals_paused,
++        } => {
++            out.push(ACTION_SET_PAUSE);
++            out.push(u8::from(*deposits_paused));
++            out.push(u8::from(*withdrawals_paused));
++        }
++        GovernanceAction::SetLimits { max_mint_per_epoch } => {
++            out.push(ACTION_SET_LIMITS);
++            out.extend_from_slice(&max_mint_per_epoch.to_le_bytes());
++        }
++        GovernanceAction::SetPauser { pauser } => {
++            out.push(ACTION_SET_PAUSER);
++            out.extend_from_slice(pauser);
++        }
++        GovernanceAction::BindLatticeGenesis => out.push(ACTION_BIND_LATTICE_GENESIS),
++    }
++}
++
++fn parse_bool(d: &[u8], o: usize) -> BridgeResult<bool> {
++    match u8_at(d, o)? {
++        0 => Ok(false),
++        1 => Ok(true),
++        _ => Err(BridgeError::MalformedMessage),
++    }
++}
++
++/// Parses a kind-4 body. `body` starts at message offset 196; every action
++/// has an exact length, trailing bytes are rejected.
++pub fn parse_governance_body(body: &[u8]) -> BridgeResult<GovernanceAction> {
++    let action = u8_at(body, 0)?;
++    let exact = |len: usize| {
++        if body.len() == len {
++            Ok(())
++        } else {
++            Err(BridgeError::MalformedMessage)
++        }
++    };
++    match action {
++        ACTION_ROTATE_GUARDIANS => {
++            let new_epoch = u64_at(body, 1)?;
++            let threshold = u8_at(body, 9)?;
++            let count = usize::from(u8_at(body, 10)?);
++            let scheme = u8_at(body, 11)?;
++            let entry_len = key_entry_len(scheme)?;
++            if count == 0 || count > MAX_GUARDIANS {
++                return Err(BridgeError::InvalidGuardianSet);
++            }
++            exact(12usize.saturating_add(count.saturating_mul(entry_len)))?;
++            let keys = body
++                .get(12..)
++                .ok_or(BridgeError::MalformedMessage)?
++                .chunks_exact(entry_len)
++                .map(|entry| parse_key_entry(scheme, entry))
++                .collect::<BridgeResult<Vec<_>>>()?;
++            Ok(GovernanceAction::RotateGuardians {
++                new_epoch,
++                threshold,
++                scheme,
++                keys,
++            })
++        }
++        ACTION_SET_PAUSE => {
++            exact(3)?;
++            Ok(GovernanceAction::SetPause {
++                deposits_paused: parse_bool(body, 1)?,
++                withdrawals_paused: parse_bool(body, 2)?,
++            })
++        }
++        ACTION_SET_LIMITS => {
++            exact(9)?;
++            Ok(GovernanceAction::SetLimits {
++                max_mint_per_epoch: u64_at(body, 1)?,
++            })
++        }
++        ACTION_SET_PAUSER => {
++            exact(33)?;
++            Ok(GovernanceAction::SetPauser {
++                pauser: a32(body, 1)?,
++            })
++        }
++        ACTION_BIND_LATTICE_GENESIS => {
++            exact(1)?;
++            Ok(GovernanceAction::BindLatticeGenesis)
++        }
++        _ => Err(BridgeError::UnknownGovernanceAction),
++    }
++}
++
++pub fn encode_governance(header: &Header, action: &GovernanceAction) -> Vec<u8> {
++    let mut out = Vec::with_capacity(HEADER_LEN.saturating_add(16));
++    encode_header(header, &mut out);
++    encode_governance_body(action, &mut out);
++    out
++}
++
++pub fn digest(message: &[u8]) -> [u8; 32] {
++    hashv(&[message]).to_bytes()
++}
++
++pub fn deployment_id(label: &[u8]) -> [u8; 32] {
++    hashv(&[DEPLOYMENT_TAG, label]).to_bytes()
++}
++
++pub fn deposit_event_id(deployment_id: &[u8; 32], sequence: u64) -> [u8; 32] {
++    hashv(&[DEPOSIT_EVENT_TAG, deployment_id, &sequence.to_le_bytes()]).to_bytes()
++}
++
++pub fn burn_event_id(deployment_id: &[u8; 32], sequence: u64) -> [u8; 32] {
++    hashv(&[BURN_EVENT_TAG, deployment_id, &sequence.to_le_bytes()]).to_bytes()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn header(kind: u8) -> Header {
++        Header {
++            kind,
++            protocol_version: PROTOCOL_VERSION,
++            scheme: SCHEME_ED25519,
++            deployment_id: [1; 32],
++            solana_genesis_hash: [2; 32],
++            lattice_genesis_hash: [3; 32],
++            source_program_id: [4; 32],
++            source_mint: [5; 32],
++            signer_epoch: 7,
++            nonce: 9,
++        }
++    }
++
++    #[test]
++    fn transfer_layout_matches_spec_offsets() {
++        let t = Transfer {
++            header: header(KIND_DEPOSIT),
++            source_amount: 0x0102_0304_0506_0708,
++            native_amount: 0x1112_1314_1516_1718,
++            recipient: [6; 32],
++            event_id: [8; 32],
++        };
++        let bytes = encode_transfer(&t);
++        assert_eq!(bytes.len(), TRANSFER_LEN);
++        assert_eq!(&bytes[0..16], DOMAIN);
++        assert_eq!(bytes[16], KIND_DEPOSIT);
++        assert_eq!(bytes[19], 0);
++        assert_eq!(&bytes[20..52], &[1; 32]);
++        assert_eq!(&bytes[84..116], &[3; 32]);
++        assert_eq!(&bytes[180..188], &7u64.to_le_bytes());
++        assert_eq!(&bytes[188..196], &9u64.to_le_bytes());
++        assert_eq!(&bytes[196..204], &t.source_amount.to_le_bytes());
++        assert_eq!(&bytes[212..244], &[6; 32]);
++        assert_eq!(parse_transfer(&bytes), Ok(t));
++    }
++
++    #[test]
++    fn rejects_bad_framing() {
++        let mut bytes = encode_transfer(&Transfer {
++            header: header(KIND_DEPOSIT),
++            source_amount: 1,
++            native_amount: 1,
++            recipient: [6; 32],
++            event_id: [8; 32],
++        });
++        assert_eq!(
++            parse_transfer(&bytes[..275]),
++            Err(BridgeError::MalformedMessage)
++        );
++        bytes[19] = 1;
++        assert_eq!(parse_transfer(&bytes), Err(BridgeError::MalformedMessage));
++        bytes[19] = 0;
++        bytes[0] = b'X';
++        assert_eq!(parse_transfer(&bytes), Err(BridgeError::WrongDomain));
++    }
++
++    #[test]
++    fn governance_round_trip_and_exact_lengths() {
++        let actions = [
++            GovernanceAction::SetPause {
++                deposits_paused: true,
++                withdrawals_paused: false,
++            },
++            GovernanceAction::SetLimits {
++                max_mint_per_epoch: 42,
++            },
++            GovernanceAction::SetPauser { pauser: [9; 32] },
++            GovernanceAction::BindLatticeGenesis,
++            GovernanceAction::RotateGuardians {
++                new_epoch: 2,
++                threshold: 2,
++                scheme: SCHEME_ED25519,
++                keys: vec![
++                    GuardianKey {
++                        ed25519: Some([1; 32]),
++                        mldsa65: None,
++                    },
++                    GuardianKey {
++                        ed25519: Some([2; 32]),
++                        mldsa65: None,
++                    },
++                ],
++            },
++        ];
++        for action in actions {
++            let message = encode_governance(&header(KIND_DESTINATION_GOVERNANCE), &action);
++            assert_eq!(parse_governance_body(&message[HEADER_LEN..]), Ok(action));
++            let mut padded = message[HEADER_LEN..].to_vec();
++            padded.push(0);
++            assert_eq!(
++                parse_governance_body(&padded),
++                Err(BridgeError::MalformedMessage)
++            );
++        }
++        assert_eq!(
++            parse_governance_body(&[99]),
++            Err(BridgeError::UnknownGovernanceAction)
++        );
++    }
++
++    #[test]
++    fn event_ids_are_domain_separated() {
++        let dep = deployment_id(b"lattice-mainnet-beta-1");
++        assert_ne!(deposit_event_id(&dep, 0), burn_event_id(&dep, 0));
++        assert_ne!(deposit_event_id(&dep, 0), deposit_event_id(&dep, 1));
++        assert_eq!(
++            deployment_id(b"x"),
++            hashv(&[b"lattice-bridge/1:deployment", b"x"]).to_bytes()
++        );
++    }
++}
+-- 
+2.51.0
+

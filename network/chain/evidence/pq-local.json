@@ -1,0 +1,105 @@
+{
+  "schema": "lattice-pq-evidence/1",
+  "label": "PQ-authorized vault transfers enforced by the runtime (local experimental fork)",
+  "status": "partial",
+  "statusDetail": "Fork patches, ML-DSA-65 syscall, pq-vault SBF program and TypeScript client are implemented and unit tested. The fork validator binary has NOT been built on this host: the release build was stopped by a disk guard (free space fell below 1.5 GiB while the separate unmodified validator ledger grew ~100-190 MB/min). No fork validator is running, so no genesis hash and no on-chain transaction signatures exist yet.",
+  "recordedAt": "2026-10-08T22:25:00+02:00",
+  "upstream": {
+    "repository": "https://github.com/anza-xyz/agave.git",
+    "release": "v4.3.0",
+    "commit": "825efd18292aff6ffcf9daa0f7612f21b3531a72"
+  },
+  "fork": {
+    "path": "chain/agave",
+    "branch": "lattice/pq-mldsa-v1",
+    "head": "31b6fe24b7f3ba7e1289a223f63d3da5380f3cd0",
+    "diffstat": "12 files changed, 667 insertions(+), 3 deletions(-)",
+    "toolchain": "rustc 1.97.1 (rust-toolchain.toml)",
+    "patches": [
+      {
+        "file": "chain/patches/0001-lattice-add-agave-mldsa-verify-crate-ML-DSA-65-via-f.patch",
+        "sha256": "548236ffaffa34aa9826d083d85cebac0c72898eb1981ff42ab4c9faef33c16f",
+        "summary": "agave-mldsa-verify crate: fips204 =0.4.6 ML-DSA-65 verify, version/length checks, CU cost, NIST ACVP + noble vectors, benchmark"
+      },
+      {
+        "file": "chain/patches/0002-lattice-add-enable_mldsa65_verify_syscall-feature-ga.patch",
+        "sha256": "a03e9ac40e4f2817992646061167f67b6197473751f5cb23b1e51e9b0b438327",
+        "summary": "feature gate enable_mldsa65_verify_syscall (2e8mniAJiRxZz5JFAU2mX8KzCN6Z16GRGkBD7fnPF62P)"
+      },
+      {
+        "file": "chain/patches/0003-lattice-add-sol_mldsa65_verify-syscall.patch",
+        "sha256": "d54637610977524a342853ae764d31bc84d01466b37c2e2b1298b437fab395f5",
+        "summary": "sol_mldsa65_verify SBF syscall + registration/behaviour tests"
+      }
+    ],
+    "featureId": "2e8mniAJiRxZz5JFAU2mX8KzCN6Z16GRGkBD7fnPF62P",
+    "featureIdDerivation": "base58(sha256(\"lattice:feature:enable_mldsa65_verify_syscall:v1\"))",
+    "activation": "solana-test-validator activates every feature in FEATURE_NAMES at genesis"
+  },
+  "crypto": {
+    "algorithm": "ML-DSA-65 (FIPS 204), pure variant, empty context string",
+    "rustCrate": "fips204 =0.4.6 (MIT OR Apache-2.0, default-features off, ml-dsa-65 only)",
+    "tsLibrary": "@noble/post-quantum 0.7.1",
+    "publicKeyBytes": 1952,
+    "signatureBytes": 3309,
+    "signedMessageBytes": 180,
+    "syscall": "sol_mldsa65_verify(version, pk_addr, msg_addr, msg_len, sig_addr) -> u64 (0 = valid)",
+    "maxMessageBytes": 4096
+  },
+  "program": {
+    "name": "pq-vault",
+    "source": "chain/programs/pq-vault",
+    "programId": "FQn1rtLkx2wTqXQK4Ur96HATPdQhHeFyA5v2F1NSChBn",
+    "programIdDerivation": "base58(sha256(\"lattice:program:pq-vault:v1\")); loaded at genesis via --bpf-program (immutable, no upgrade authority)",
+    "artifact": "chain/target/deploy/lattice_pq_vault.so",
+    "artifactBytes": 34984,
+    "artifactSha256": "e9d9dad859cedbe2167a83a8b99dbe8bd9dc197bcacba9e51c85d4faafb3240a",
+    "sbpf": "v0 ELF (cargo-build-sbf 4.0.0-alpha.0, platform-tools v1.52); imports sol_mldsa65_verify, so it cannot load on unmodified Agave"
+  },
+  "ports": {
+    "rpc": 8999,
+    "websocket": 9000,
+    "faucet": 9990,
+    "gossip": 10050,
+    "dynamicPortRange": "10100-10200",
+    "ledger": "chain/ledger/pq-local"
+  },
+  "genesisHash": null,
+  "validatorVersion": null,
+  "measurements": {
+    "host": "Apple Silicon macOS (darwin 25.6.0), release build, median of 2000 iterations",
+    "mldsa65VerifyMedianNs": 108666,
+    "secp256k1RecoverMedianNs": 91750,
+    "calibration": "secp256k1_recover syscall costs 25000 CU => 3.670 ns/CU on this host => 29610 CU suggested",
+    "mldsa65VerifyBaseCu": 30000,
+    "mldsa65VerifyPerByteCu": "1 CU per 32 message bytes (rounded up)",
+    "syscallCuPerVaultTransfer": 30006,
+    "executeInstructionTotalCu": null,
+    "transactionsPerPqTransfer": 4,
+    "pqTransferTransactionBytes": [1232, 1232, 1232, 729],
+    "oneTimeVaultSetupTransactions": 3,
+    "vaultSetupTransactionBytes": [1232, 1232, 305],
+    "packetLimitBytes": 1232,
+    "vaultAccountBytes": 2048,
+    "signatureBufferAccountBytes": 3392
+  },
+  "tests": {
+    "agave-mldsa-verify": { "passed": 6, "failed": 0, "includes": "15 NIST ACVP ML-DSA-65 sigVer vectors (3 valid, 12 invalid) + 4 noble cross-implementation vectors with mutations" },
+    "solana-syscalls (mldsa65 filter)": { "passed": 2, "failed": 0, "includes": "feature-gated registration; valid/invalid/short message/unsupported version/oversize/access violation/insufficient CU" },
+    "pq-vault host tests": { "passed": 8, "failed": 0, "includes": "valid transfer, replay, tampered amount/expiry/recipient, wrong genesis, bit-flipped signature, wrong key, expiry, insufficient funds, incomplete buffer, out-of-order write, sealed vault, golden message vector" },
+    "@lattice/crypto vitest": { "passed": 5, "failed": 0, "includes": "golden message vector shared with Rust, field binding, packet-size packing" },
+    "onChainIntegration": { "status": "not run", "reason": "fork validator not built (disk)", "command": "pnpm --filter @lattice/crypto pq:demo" }
+  },
+  "sampleTransactions": [],
+  "stillClassical": [
+    "Fee payer and every transaction signature: Ed25519",
+    "Relayer that stages signature buffers and submits pq-vault transactions: Ed25519 (cannot move vault funds)",
+    "Vault account creation: one-time Ed25519 signature by the vault address and setup authority; powerless after SealVault",
+    "Validator identity and vote accounts: Ed25519",
+    "Votes / consensus (Tower BFT, and Alpenglow BLS where enabled): classical",
+    "Gossip, Turbine shreds, repair, QUIC/TLS networking: classical",
+    "Bridge authorities: none implemented",
+    "Program upgrade authority: pq-vault is immutable at genesis; all other upgradeable programs use Ed25519 authorities",
+    "Wallets and ordinary system-program accounts: Ed25519"
+  ]
+}

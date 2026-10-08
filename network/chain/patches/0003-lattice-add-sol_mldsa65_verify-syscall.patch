@@ -1,0 +1,264 @@
+From 31b6fe24b7f3ba7e1289a223f63d3da5380f3cd0 Mon Sep 17 00:00:00 2001
+From: Lattice PQ <pq@lattice.local>
+Date: Thu, 8 Oct 2026 22:09:03 +0200
+Subject: [PATCH 3/3] lattice: add sol_mldsa65_verify syscall
+
+sol_mldsa65_verify(version, pk_addr, msg_addr, msg_len, sig_addr) -> u64
+verifies an ML-DSA-65 (FIPS 204) signature inside the SBF runtime.
+Charges agave_mldsa_verify::verify_cost(min(msg_len, 4096)) CU before
+reading input, rejects unsupported versions and messages > 4096 bytes,
+and returns 0 or an MlDsaVerifyError code. Feature gated by
+enable_mldsa65_verify_syscall.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+---
+ Cargo.lock          |   3 +
+ syscalls/Cargo.toml |   3 +
+ syscalls/src/lib.rs | 173 ++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 179 insertions(+)
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 993f0d637..e6aea649d 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -11078,10 +11078,13 @@ dependencies = [
+ name = "solana-syscalls"
+ version = "4.3.0"
+ dependencies = [
++ "agave-mldsa-verify",
+  "assert_matches",
+  "bincode",
++ "hex",
+  "libsecp256k1",
+  "num-traits",
++ "serde_json",
+  "solana-account 4.5.0",
+  "solana-account-info",
+  "solana-big-mod-exp",
+diff --git a/syscalls/Cargo.toml b/syscalls/Cargo.toml
+index 442eccbc7..85f78ece9 100644
+--- a/syscalls/Cargo.toml
++++ b/syscalls/Cargo.toml
+@@ -27,6 +27,7 @@ shuttle-test = [
+ svm-internal = []
+ 
+ [dependencies]
++agave-mldsa-verify = { workspace = true }
+ bincode = { workspace = true }
+ libsecp256k1 = { workspace = true }
+ num-traits = { workspace = true }
+@@ -65,6 +66,8 @@ wincode = { workspace = true }
+ 
+ [dev-dependencies]
+ assert_matches = { workspace = true }
++hex = { workspace = true }
++serde_json = { workspace = true }
+ solana-epoch-rewards = { workspace = true }
+ solana-epoch-schedule = { workspace = true }
+ solana-fee-calculator = { workspace = true }
+diff --git a/syscalls/src/lib.rs b/syscalls/src/lib.rs
+index 012a7a84e..6e4f6351a 100644
+--- a/syscalls/src/lib.rs
++++ b/syscalls/src/lib.rs
+@@ -331,6 +331,7 @@ pub fn create_program_runtime_environment(
+         feature_set.remaining_compute_units_syscall_enabled;
+     let get_sysvar_syscall_enabled = feature_set.get_sysvar_syscall_enabled;
+     let enable_get_epoch_stake_syscall = feature_set.enable_get_epoch_stake_syscall;
++    let enable_mldsa65_verify_syscall = feature_set.enable_mldsa65_verify_syscall;
+     let min_sbpf_version =
+         if !feature_set.disable_sbpf_v0_execution || feature_set.reenable_sbpf_v0_execution {
+             SBPFVersion::V0
+@@ -546,6 +547,14 @@ pub fn create_program_runtime_environment(
+     // Log data
+     SyscallLogData::register(&mut result, "sol_log_data")?;
+ 
++    // ML-DSA-65 (FIPS 204) signature verification, Lattice experimental fork
++    register_feature_gated_function!(
++        result,
++        enable_mldsa65_verify_syscall,
++        "sol_mldsa65_verify",
++        SyscallMlDsa65Verify
++    )?;
++
+     Ok(ProgramRuntimeEnvironment::from(result))
+ }
+ 
+@@ -978,6 +987,62 @@ declare_builtin_function!(
+     }
+ );
+ 
++declare_builtin_function!(
++    /// ML-DSA-65 signature verification.
++    ///
++    /// Arguments: algorithm version, public key address (1952 bytes),
++    /// message address, message length, signature address (3309 bytes).
++    /// Returns `0` for a valid signature or an `MlDsaVerifyError` code.
++    /// The compute cost is charged before any input is read.
++    SyscallMlDsa65Verify,
++    fn rust(
++        invoke_context: &mut InvokeContext<'_, '_>,
++        version: u64,
++        public_key_addr: u64,
++        message_addr: u64,
++        message_len: u64,
++        signature_addr: u64,
++    ) -> Result<u64, Error> {
++        use agave_mldsa_verify::{
++            MLDSA65_MAX_MESSAGE_LEN, MLDSA65_PUBLIC_KEY_LEN, MLDSA65_SIGNATURE_LEN,
++            MLDSA65_VERSION_V1, MlDsaVerifyError, verify, verify_cost,
++        };
++
++        let charged_len = message_len.min(MLDSA65_MAX_MESSAGE_LEN as u64);
++        invoke_context
++            .compute_meter
++            .consume_checked(verify_cost(charged_len))?;
++
++        if version != MLDSA65_VERSION_V1 {
++            return Ok(MlDsaVerifyError::UnsupportedVersion.into());
++        }
++        if message_len > MLDSA65_MAX_MESSAGE_LEN as u64 {
++            return Ok(MlDsaVerifyError::MessageTooLong.into());
++        }
++
++        let check_aligned = invoke_context.get_check_aligned();
++        let memory_mapping = invoke_context.memory_contexts.memory_mapping_mut()?;
++        let public_key = translate_slice::<u8>(
++            memory_mapping,
++            public_key_addr,
++            MLDSA65_PUBLIC_KEY_LEN as u64,
++            check_aligned,
++        )?;
++        let message = translate_slice::<u8>(memory_mapping, message_addr, message_len, check_aligned)?;
++        let signature = translate_slice::<u8>(
++            memory_mapping,
++            signature_addr,
++            MLDSA65_SIGNATURE_LEN as u64,
++            check_aligned,
++        )?;
++
++        Ok(match verify(version, public_key, message, signature) {
++            Ok(()) => SUCCESS,
++            Err(error) => error.into(),
++        })
++    }
++);
++
+ declare_builtin_function!(
+     // Elliptic Curve Point Validation
+     //
+@@ -8361,4 +8426,112 @@ mod tests {
+             Result::Err(error) if error.downcast_ref::<InstructionError>().unwrap() == &InstructionError::ComputationalBudgetExceeded
+         );
+     }
++    #[test]
++    fn test_sol_mldsa65_verify_registration() {
++        let compute_budget = SVMTransactionExecutionBudget::default();
++        let mut feature_set = SVMFeatureSet::all_enabled();
++        for enabled in [true, false] {
++            feature_set.enable_mldsa65_verify_syscall = enabled;
++            let env = create_program_runtime_environment(
++                &feature_set,
++                &compute_budget,
++                /* reject_deployment_of_broken_elfs */ false,
++                /* debugging_features */ false,
++            )
++            .unwrap();
++            assert_eq!(
++                env.get_function_registry()
++                    .lookup_by_name(b"sol_mldsa65_verify")
++                    .is_some(),
++                enabled
++            );
++        }
++    }
++
++    #[test]
++    fn test_syscall_mldsa65_verify() {
++        use agave_mldsa_verify::{MLDSA65_MAX_MESSAGE_LEN, MlDsaVerifyError, verify_cost};
++        use solana_sbpf::vm::ContextObject;
++
++        let vectors: serde_json::Value = serde_json::from_str(include_str!(
++            "../../mldsa-verify/tests/vectors/noble-mldsa65.json"
++        ))
++        .unwrap();
++        let case = &vectors["cases"][0];
++        let decode = |k: &str| hex::decode(case[k].as_str().unwrap()).unwrap();
++        let public_key = decode("publicKey");
++        let message = decode("message");
++        let signature = decode("signature");
++        let mut bad_signature = signature.clone();
++        bad_signature[7] ^= 0x80;
++
++        let config = Config::default();
++        prepare_mockup!(invoke_context, program_id, bpf_loader::id());
++        let (pk_va, msg_va, sig_va, bad_sig_va) =
++            (0x100000000, 0x200000000, 0x300000000, 0x400000000);
++        let memory_mapping = unsafe {
++            MemoryMapping::new(
++                vec![
++                    MemoryRegion::new(&raw const *public_key.as_slice(), pk_va),
++                    MemoryRegion::new(&raw const *message.as_slice(), msg_va),
++                    MemoryRegion::new(&raw const *signature.as_slice(), sig_va),
++                    MemoryRegion::new(&raw const *bad_signature.as_slice(), bad_sig_va),
++                ],
++                &config,
++                SBPFVersion::V3,
++            )
++            .unwrap()
++        };
++        invoke_context
++            .memory_contexts
++            .mock_set_mapping_abi_v1(memory_mapping);
++        let msg_len = message.len() as u64;
++        let cost = verify_cost(msg_len);
++
++        let call = |invoke_context: &mut InvokeContext, version, msg_va, len, sig_va| {
++            SyscallMlDsa65Verify::rust(invoke_context, version, pk_va, msg_va, len, sig_va)
++        };
++
++        invoke_context.compute_meter.mock_set_remaining(cost);
++        assert_eq!(call(&mut invoke_context, 1, msg_va, msg_len, sig_va).unwrap(), 0);
++        assert_eq!(invoke_context.get_remaining(), 0);
++
++        invoke_context.compute_meter.mock_set_remaining(cost);
++        assert_eq!(
++            call(&mut invoke_context, 1, msg_va, msg_len, bad_sig_va).unwrap(),
++            MlDsaVerifyError::InvalidSignature as u64
++        );
++        invoke_context.compute_meter.mock_set_remaining(cost);
++        assert_eq!(
++            call(&mut invoke_context, 1, msg_va, msg_len - 1, sig_va).unwrap(),
++            MlDsaVerifyError::InvalidSignature as u64
++        );
++        invoke_context.compute_meter.mock_set_remaining(cost);
++        assert_eq!(
++            call(&mut invoke_context, 2, msg_va, msg_len, sig_va).unwrap(),
++            MlDsaVerifyError::UnsupportedVersion as u64
++        );
++        invoke_context
++            .compute_meter
++            .mock_set_remaining(verify_cost(MLDSA65_MAX_MESSAGE_LEN as u64));
++        assert_eq!(
++            call(&mut invoke_context, 1, msg_va, u64::MAX, sig_va).unwrap(),
++            MlDsaVerifyError::MessageTooLong as u64
++        );
++
++        // Signature region shorter than 3309 bytes is an access violation.
++        invoke_context.compute_meter.mock_set_remaining(cost);
++        assert_access_violation!(
++            call(&mut invoke_context, 1, msg_va, msg_len, sig_va + 1),
++            sig_va + 1,
++            agave_mldsa_verify::MLDSA65_SIGNATURE_LEN as u64
++        );
++
++        // Insufficient compute budget is rejected before verification.
++        invoke_context.compute_meter.mock_set_remaining(cost - 1);
++        assert_matches!(
++            call(&mut invoke_context, 1, msg_va, msg_len, sig_va),
++            Result::Err(error) if error.downcast_ref::<InstructionError>().unwrap() == &InstructionError::ComputationalBudgetExceeded
++        );
++    }
+ }
+-- 
+2.51.0
+

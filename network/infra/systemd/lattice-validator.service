@@ -1,0 +1,57 @@
+[Unit]
+Description=Lattice testnet validator (single-node solana-test-validator, Lattice Agave fork)
+Documentation=file:///opt/lattice/current/infra/RUNBOOK.md
+After=network-online.target lattice-edge-limits.service
+Wants=network-online.target
+# Set by lattice-disk-alarm when the disk is nearly full; cleared by an operator.
+ConditionPathExists=!/var/lib/lattice/state/disk-guard-tripped
+StartLimitIntervalSec=900
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=lattice
+Group=lattice
+EnvironmentFile=/etc/lattice/lattice.env
+ExecStart=/usr/local/lib/lattice/bin/lattice-validator-start
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=infinity
+TimeoutStopSec=180
+SyslogIdentifier=lattice-validator
+StandardOutput=journal
+StandardError=journal
+
+LimitNOFILE=1000000
+LimitMEMLOCK=2000000000
+TasksMax=16384
+MemoryHigh=20G
+MemoryMax=24G
+OOMScoreAdjust=-200
+
+# The validator only talks to itself and to local clients. Its faucet binds
+# 0.0.0.0:9900 regardless of --bind-address; this keeps it private even if
+# the host firewall is disabled.
+IPAddressDeny=any
+IPAddressAllow=localhost
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/lattice/ledger
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

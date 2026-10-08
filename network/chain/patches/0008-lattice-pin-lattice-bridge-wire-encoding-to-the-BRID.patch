@@ -1,0 +1,78 @@
+From 2987a72ad1743629419bb10f0ebec9447a1c219a Mon Sep 17 00:00:00 2001
+From: Lattice Bridge <bridge@lattice.local>
+Date: Thu, 8 Oct 2026 23:50:18 +0200
+Subject: [PATCH] lattice: pin lattice-bridge wire encoding to the BRIDGE_SPEC
+ vector
+
+Asserts that the builtin's wire-v1 encoder reproduces the cross-language
+test vector of BRIDGE_SPEC section 13 (programs/source-vault/tests and
+packages/protocol): deployment id, all 276 message bytes and the SHA-256
+digest, and that parse_transfer round-trips it.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+---
+ programs/lattice-bridge/src/wire.rs | 48 +++++++++++++++++++++++++++++
+ 1 file changed, 48 insertions(+)
+
+diff --git a/programs/lattice-bridge/src/wire.rs b/programs/lattice-bridge/src/wire.rs
+index ad48ea7f6..a67127034 100644
+--- a/programs/lattice-bridge/src/wire.rs
++++ b/programs/lattice-bridge/src/wire.rs
+@@ -357,6 +357,54 @@ pub fn burn_event_id(deployment_id: &[u8; 32], sequence: u64) -> [u8; 32] {
+ mod tests {
+     use super::*;
+ 
++    fn hex(bytes: &[u8]) -> String {
++        bytes.iter().map(|b| format!("{b:02x}")).collect()
++    }
++
++    /// BRIDGE_SPEC §13 cross-language vector (programs/source-vault/tests/vector-*.txt).
++    #[test]
++    fn matches_spec_test_vector() {
++        let deployment = deployment_id(b"lattice-test-vector-1");
++        assert_eq!(
++            hex(&deployment),
++            "0f61335be1ff22f2ce425aeecc7ec7251ab3d131b57040c2ec54101de6f3bef8"
++        );
++        let transfer = Transfer {
++            header: Header {
++                kind: KIND_WITHDRAWAL,
++                protocol_version: 1,
++                scheme: SCHEME_ED25519,
++                deployment_id: deployment,
++                solana_genesis_hash: [1; 32],
++                lattice_genesis_hash: [2; 32],
++                source_program_id: [3; 32],
++                source_mint: [4; 32],
++                signer_epoch: 7,
++                nonce: 42,
++            },
++            source_amount: 1_500_000,
++            native_amount: 1_500_000_000,
++            recipient: [5; 32],
++            event_id: burn_event_id(&deployment, 42),
++        };
++        let bytes = encode_transfer(&transfer);
++        assert_eq!(
++            hex(&bytes),
++            "6c6174746963652d6272696467652f31020101000f61335be1ff22f2ce425aeecc7ec7251ab3d131b57040c2\
++             ec54101de6f3bef8010101010101010101010101010101010101010101010101010101010101010102020202\
++             0202020202020202020202020202020202020202020202020202020203030303030303030303030303030303\
++             0303030303030303030303030303030304040404040404040404040404040404040404040404040404040404\
++             0404040407000000000000002a0000000000000060e3160000000000002f6859000000000505050505050505\
++             05050505050505050505050505050505050505050505050541b4db535ca9f85e0aab64760fa91b4d161c9439\
++             d3b42877b507a2ec5cc7c2fd"
++        );
++        assert_eq!(
++            hex(&digest(&bytes)),
++            "c3b0a8d2da14c6918f44cabe2cb366a79e5911c4b1e4e58024649f5f15a94be3"
++        );
++        assert_eq!(parse_transfer(&bytes), Ok(transfer));
++    }
++
+     fn header(kind: u8) -> Header {
+         Header {
+             kind,
+-- 
+2.51.0
+

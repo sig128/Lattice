@@ -1,0 +1,28 @@
+[package]
+name = "lattice-pq-vault"
+version = "0.1.0"
+description = "Lattice experimental: lamport vault controlled by an ML-DSA-65 key, verified by the sol_mldsa65_verify syscall"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+solana-account-info = "3.1.1"
+solana-define-syscall = "5.2.0"
+solana-msg = "3.1.0"
+solana-program-entrypoint = "3.1.1"
+solana-program-error = "3.0.1"
+solana-pubkey = { version = "4.3.0", default-features = false }
+solana-sysvar = "4.2.0"
+
+[dev-dependencies]
+fips204 = { version = "=0.4.6", default-features = false, features = ["ml-dsa-65"] }
+solana-pubkey = { version = "4.3.0", default-features = false, features = ["std"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
+
+[workspace]

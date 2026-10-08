@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# ExecStart for lattice-validator.service (runs as the lattice user).
+# Single-node testnet: solana-test-validator built from the Lattice Agave fork.
+# Flags verified against chain/agave validator/src/cli.rs (Agave v4.3.0).
+set -euo pipefail
+
+BIN=/var/lib/lattice/bin/solana-test-validator
+LEDGER=/var/lib/lattice/ledger
+PROGRAM_DIR=/var/lib/lattice/genesis-programs
+
+if [[ "${LATTICE_ENVIRONMENT:-}" != "testnet" ]]; then
+  echo "lattice-validator: LATTICE_ENVIRONMENT must be testnet (got '${LATTICE_ENVIRONMENT:-}')" >&2
+  exit 78
+fi
+[[ -x "${BIN}" ]] || { echo "lattice-validator: missing ${BIN}; run bootstrap" >&2; exit 78; }
+
+args=(
+  --ledger "${LEDGER}"
+  # Every validator socket (RPC 8899, PubSub 8900, gossip, TPU) on loopback.
+  # The faucet still binds 0.0.0.0:9900; the unit's IPAddressDeny and ufw keep it private.
+  --bind-address 127.0.0.1
+  --rpc-port 8899
+  --faucet-port 9900
+  --gossip-port 10000
+  --dynamic-port-range 10001-10101
+  # Bounded blockstore (formerly --limit-ledger-size).
+  --limit-blockstore-size "${LATTICE_LEDGER_LIMIT_SHREDS:-2000000}"
+  --faucet-sol "${LATTICE_FAUCET_SOL:-1000000}"
+  --faucet-time-slice-secs "${LATTICE_FAUCET_TIME_SLICE_SECS:-3600}"
+  --faucet-per-time-sol-cap "${LATTICE_FAUCET_PER_TIME_SOL_CAP:-200}"
+  --faucet-per-request-sol-cap "${LATTICE_FAUCET_PER_REQUEST_SOL_CAP:-2}"
+  # Stream logs to journald. Without --log the test validator writes a new
+  # timestamped log file into the ledger directory on every start.
+  --log
+)
+
+# Genesis-only programs. solana-test-validator also activates every feature in
+# FEATURE_NAMES at genesis, including the fork's ML-DSA syscall gate.
+if [[ ! -e "${LEDGER}/genesis.bin" && -n "${LATTICE_GENESIS_BPF_PROGRAMS:-}" ]]; then
+  IFS=',' read -r -a programs <<<"${LATTICE_GENESIS_BPF_PROGRAMS}"
+  for entry in "${programs[@]}"; do
+    id="${entry%%:*}"
+    file="${PROGRAM_DIR}/${entry#*:}"
+    if [[ -f "${file}" ]]; then
+      args+=(--bpf-program "${id}" "${file}")
+    else
+      echo "lattice-validator: genesis program ${file} not found; skipping ${id}" >&2
+    fi
+  done
+fi
+
+"${BIN}" --version
+exec "${BIN}" "${args[@]}"

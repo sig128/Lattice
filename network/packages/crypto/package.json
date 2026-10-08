@@ -1,0 +1,23 @@
+{
+  "name": "@lattice/crypto",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "benchmark": "tsx src/benchmark.ts",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.scripts.json",
+    "test": "vitest run",
+    "build": "tsc -p tsconfig.json",
+    "pq:demo": "tsx scripts/pq-vault-demo.ts",
+    "pq:vectors": "tsx scripts/gen-rust-vectors.ts ../../chain/agave/mldsa-verify/tests/vectors/noble-mldsa65.json"
+  },
+  "dependencies": {
+    "@noble/post-quantum": "0.7.1",
+    "@solana/web3.js": "1.99.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.4",
+    "tsx": "4.23.15"
+  }
+}

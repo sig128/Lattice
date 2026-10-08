@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Nightly backup (cron 03:17 UTC).
+#   PostgreSQL: pg_dump -Fc of database lattice, kept LATTICE_BACKUP_PG_KEEP_DAYS days.
+#   Ledger:     newest full snapshot archive + genesis files + validator keys
+#               + bridge demo state, newest LATTICE_BACKUP_LEDGER_KEEP sets.
+#   Retention:  rpc_observations rows older than LATTICE_OBSERVATION_RETENTION_DAYS.
+# Backups live on the same EBS volume; set LATTICE_BACKUP_S3_URI (with awscli
+# and an instance role) for an off-host copy, or pull them (RUNBOOK.md).
+set -euo pipefail
+# shellcheck source=SCRIPTDIR/../lib/common.sh
+. /usr/local/lib/lattice/common.sh
+LATTICE_LOG_TAG=lattice-backup
+require_root
+take_lock lattice-backup
+
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+pg_keep="$(env_get LATTICE_BACKUP_PG_KEEP_DAYS)"; pg_keep="${pg_keep:-14}"
+ledger_keep="$(env_get LATTICE_BACKUP_LEDGER_KEEP)"; ledger_keep="${ledger_keep:-3}"
+obs_days="$(env_get LATTICE_OBSERVATION_RETENTION_DAYS)"; obs_days="${obs_days:-30}"
+crit_pct="$(env_get LATTICE_DISK_CRIT_PCT)"; crit_pct="${crit_pct:-85}"
+install -d -m 0700 "${LATTICE_BACKUPS}/pg" "${LATTICE_BACKUPS}/ledger"
+cd /
+
+# PostgreSQL
+dump="${LATTICE_BACKUPS}/pg/lattice-${stamp}.dump"
+runuser -u postgres -- pg_dump -Fc lattice >"${dump}.partial"
+mv "${dump}.partial" "${dump}"
+chmod 0600 "${dump}"
+find "${LATTICE_BACKUPS}/pg" -name 'lattice-*.dump' -mtime +"${pg_keep}" -delete
+log "pg_dump $(du -h "${dump}" | cut -f1) -> ${dump}"
+if runuser -u postgres -- psql -d lattice -tAc "SELECT to_regclass('public.rpc_observations') IS NOT NULL" | grep -qx t; then
+  deleted="$(runuser -u postgres -- psql -d lattice -tAc \
+    "WITH d AS (DELETE FROM rpc_observations WHERE checked_at < now() - interval '${obs_days} days' RETURNING 1) SELECT count(*) FROM d")"
+  log "rpc_observations retention: deleted ${deleted} rows older than ${obs_days} days"
+fi
+
+# Ledger snapshot set (skipped when the disk is already under pressure).
+used_pct="$(df --output=pcent / | tail -1 | tr -dc '0-9')"
+if (( used_pct >= crit_pct )); then
+  alert warning "backup skipped ledger snapshot: root filesystem ${used_pct}% used"
+else
+  snapshot="$(find "${LATTICE_LEDGER}" -maxdepth 1 -name 'snapshot-*.tar.*' -printf '%T@ %p\n' | sort -rn | head -1 | cut -d' ' -f2-)"
+  if [[ -n "${snapshot}" ]]; then
+    set_dir="${LATTICE_BACKUPS}/ledger/${stamp}"
+    install -d -m 0700 "${set_dir}"
+    cp --reflink=auto "${snapshot}" "${set_dir}/"
+    for file in genesis.bin genesis.tar.bz2; do
+      [[ -f "${LATTICE_LEDGER}/${file}" ]] && cp "${LATTICE_LEDGER}/${file}" "${set_dir}/"
+    done
+    tar -C "${LATTICE_KEYS}" --exclude=archive -cf "${set_dir}/keys.tar" .
+    [[ -d "${LATTICE_BRIDGE_DATA}" ]] && tar -C "${LATTICE_BRIDGE_DATA}" -cf "${set_dir}/bridge-data.tar" .
+    chmod 0600 "${set_dir}"/*
+    jq -n --arg genesis "$(env_get NEXT_PUBLIC_NATIVE_GENESIS_HASH)" --arg snapshot "$(basename "${snapshot}")" \
+      --arg at "$(date -u +%FT%TZ)" '{genesisHash: $genesis, snapshot: $snapshot, createdAt: $at}' >"${set_dir}/manifest.json"
+    (cd "${set_dir}" && sha256sum -- * >SHA256SUMS)
+    log "ledger set $(du -sh "${set_dir}" | cut -f1) -> ${set_dir}"
+  else
+    warn "no snapshot archive in ${LATTICE_LEDGER} yet"
+  fi
+  find "${LATTICE_BACKUPS}/ledger" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -r | tail -n +"$((ledger_keep + 1))" |
+    while read -r old; do rm -rf "${LATTICE_BACKUPS:?}/ledger/${old}"; done
+fi
+
+s3="$(env_get LATTICE_BACKUP_S3_URI)"
+if [[ -n "${s3}" ]]; then
+  if command -v aws >/dev/null; then
+    aws s3 sync --only-show-errors "${LATTICE_BACKUPS}" "${s3}" || alert warning "off-host backup sync to ${s3} failed"
+  else
+    alert warning "LATTICE_BACKUP_S3_URI is set but awscli is not installed"
+  fi
+fi
+log "backup ${stamp} complete"

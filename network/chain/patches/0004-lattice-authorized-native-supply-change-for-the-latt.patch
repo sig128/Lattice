@@ -1,0 +1,356 @@
+From b372f67bceb98cd9f08a187a7e5a8439572a3bd9 Mon Sep 17 00:00:00 2001
+From: Lattice Bridge <bridge@lattice.local>
+Date: Thu, 8 Oct 2026 23:13:36 +0200
+Subject: [PATCH 4/7] lattice: authorized native supply change for the
+ lattice-bridge builtin
+
+Agave rejects any instruction or transaction whose lamport sum changes
+(UnbalancedInstruction / UnbalancedTransaction). Native LAT issuance and
+burn need exactly one, narrowly scoped exception:
+
+- TransactionContext::record_native_supply_change(delta) lets the
+  currently executing instruction declare that it created (delta > 0) or
+  destroyed (delta < 0) lamports after crediting/debiting an account. It
+  is only accepted when the current program is LATTICE_BRIDGE_PROGRAM_ID
+  (Geuc2RbbzoWXSNYRyVDcjM5fZx6raKgf45y1bQr6aSzN) at top-level stack
+  height; there is no syscall, so SBF programs cannot reach it.
+- The per-instruction balance check therefore still holds for every other
+  lamport movement; the SVM end-of-transaction check now requires
+  post_sum == pre_sum + native_supply_delta exactly.
+- The delta is carried in AccountsDeltas (Some only on success) and the
+  bank applies it to capitalization in commit_transactions. Failed
+  transactions roll back and change nothing. Capitalization keeps
+  matching the account-balance sum, which snapshot load re-verifies.
+
+Tests: transaction-context unit tests for balanced mint, unrecorded mint,
+wrong amount, other program, and CPI depth.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+---
+ runtime/src/account_saver.rs            |   1 +
+ runtime/src/bank.rs                     |  29 ++++++
+ runtime/src/bank/tests.rs               |   1 +
+ svm/src/transaction_execution_result.rs |   3 +
+ svm/src/transaction_processor.rs        |  10 +-
+ transaction-context/src/lib.rs          |   6 ++
+ transaction-context/src/transaction.rs  | 133 ++++++++++++++++++++++++
+ 7 files changed, 182 insertions(+), 1 deletion(-)
+
+diff --git a/runtime/src/account_saver.rs b/runtime/src/account_saver.rs
+index 09d8e7e7b..ab2418cbc 100644
+--- a/runtime/src/account_saver.rs
++++ b/runtime/src/account_saver.rs
+@@ -211,6 +211,7 @@ mod tests {
+         let accounts_deltas = status.as_ref().is_ok().then_some(AccountsDeltas {
+             accounts_resize_delta: 0,
+             accounts_uninitialized_size: 0,
++            native_supply_delta: 0,
+         });
+         Ok(ProcessedTransaction::Executed(Box::new(
+             ExecutedTransaction {
+diff --git a/runtime/src/bank.rs b/runtime/src/bank.rs
+index 2d05e6179..44c6d0db6 100644
+--- a/runtime/src/bank.rs
++++ b/runtime/src/bank.rs
+@@ -4300,6 +4300,26 @@ impl Bank {
+             .unwrap();
+     }
+ 
++    /// Lattice fork: apply native lamports created or destroyed by the
++    /// lattice-bridge builtin in committed, successful transactions.
++    ///
++    /// Capitalization always equals the sum of all account balances (this is
++    /// re-verified on snapshot load), and the SVM only accepts a transaction
++    /// whose post-balances differ from its pre-balances by exactly this delta,
++    /// so leaving the u64 range here would mean that invariant is broken.
++    fn apply_native_supply_delta(&self, delta: i128) {
++        if delta == 0 {
++            return;
++        }
++        self.capitalization
++            .fetch_update(AcqRel, Acquire, |capitalization| {
++                i128::from(capitalization)
++                    .checked_add(delta)
++                    .and_then(|updated| u64::try_from(updated).ok())
++            })
++            .expect("lattice-bridge native supply delta keeps capitalization within u64");
++    }
++
+     /// Update the accounts data size delta from off-chain events by adding `amount`.
+     /// The arithmetic saturates.
+     fn update_accounts_data_size_delta_off_chain(&self, amount: i64) {
+@@ -4468,6 +4488,15 @@ impl Bank {
+             .sum();
+         self.update_accounts_data_size_delta_on_chain(accounts_data_len_delta);
+ 
++        let native_supply_delta: i128 = processing_results
++            .iter()
++            .filter_map(|processing_result| processing_result.processed_transaction())
++            .filter_map(|processed_tx| processed_tx.execution_details())
++            .filter_map(|details| details.accounts_deltas.as_ref())
++            .map(|deltas| deltas.native_supply_delta)
++            .sum();
++        self.apply_native_supply_delta(native_supply_delta);
++
+         let ((), update_transaction_statuses_us) =
+             measure_us!(self.update_transaction_statuses(sanitized_txs, &processing_results));
+ 
+diff --git a/runtime/src/bank/tests.rs b/runtime/src/bank/tests.rs
+index 919bf64bb..ff3367d5c 100644
+--- a/runtime/src/bank/tests.rs
++++ b/runtime/src/bank/tests.rs
+@@ -255,6 +255,7 @@ fn new_executed_processing_result(
+     let accounts_deltas = status.as_ref().is_ok().then_some(AccountsDeltas {
+         accounts_resize_delta: 0,
+         accounts_uninitialized_size: 0,
++        native_supply_delta: 0,
+     });
+     Ok(ProcessedTransaction::Executed(Box::new(
+         ExecutedTransaction {
+diff --git a/svm/src/transaction_execution_result.rs b/svm/src/transaction_execution_result.rs
+index dd4dd8881..9d9d9f61e 100644
+--- a/svm/src/transaction_execution_result.rs
++++ b/svm/src/transaction_execution_result.rs
+@@ -51,4 +51,7 @@ pub struct AccountsDeltas {
+     pub accounts_resize_delta: i64,
+     /// aggregate size of all accounts that were uninitialized by this transaction
+     pub accounts_uninitialized_size: u64,
++    /// Lattice fork: native lamports created (positive) or destroyed
++    /// (negative) by the lattice-bridge builtin; applied to capitalization.
++    pub native_supply_delta: i128,
+ }
+diff --git a/svm/src/transaction_processor.rs b/svm/src/transaction_processor.rs
+index 68c36be0f..147ad162f 100644
+--- a/svm/src/transaction_processor.rs
++++ b/svm/src/transaction_processor.rs
+@@ -1168,6 +1168,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
+             return_data,
+             mut touched_flags,
+             accounts_resize_delta,
++            native_supply_delta,
+         } = execution_record;
+ 
+         // The fee payer (account index 0) is debited during loading, outside the
+@@ -1180,9 +1181,15 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
+         // including the fee payer marked above.
+         let touched_account_count = touched_flags.iter().filter(|touched| **touched).count();
+ 
++        // Lattice fork: the only permitted imbalance is the native supply change
++        // recorded by the lattice-bridge builtin.
++        let expected_lamports_after_tx = i128::try_from(lamports_before_tx)
++            .ok()
++            .and_then(|before| before.checked_add(native_supply_delta))
++            .and_then(|after| u128::try_from(after).ok());
+         if post_account_state_info_result.is_ok()
+             && transaction_accounts_lamports_sum(&accounts)
+-                .filter(|lamports_after_tx| lamports_before_tx == *lamports_after_tx)
++                .filter(|lamports_after_tx| expected_lamports_after_tx == Some(*lamports_after_tx))
+                 .is_none()
+         {
+             post_account_state_info_result = Err(TransactionError::UnbalancedTransaction);
+@@ -1199,6 +1206,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
+                         accounts_uninitialized_size: get_uninitialized_accounts_size(
+                             &post_state_info,
+                         ),
++                        native_supply_delta,
+                     }),
+                 )
+             })
+diff --git a/transaction-context/src/lib.rs b/transaction-context/src/lib.rs
+index 7a0e3a37e..04a052a4c 100644
+--- a/transaction-context/src/lib.rs
++++ b/transaction-context/src/lib.rs
+@@ -48,3 +48,9 @@ static_assertions::const_assert_eq!(
+ 
+ /// Index of an account inside of the transaction or an instruction.
+ pub type IndexOfAccount = u16;
++
++/// Lattice fork: the only program allowed to change native lamport supply
++/// inside a transaction (`TransactionContext::record_native_supply_change`).
++/// Id = base58(sha256("lattice:program:lattice-bridge:v1")).
++pub const LATTICE_BRIDGE_PROGRAM_ID: solana_pubkey::Pubkey =
++    solana_pubkey::Pubkey::from_str_const("Geuc2RbbzoWXSNYRyVDcjM5fZx6raKgf45y1bQr6aSzN");
+diff --git a/transaction-context/src/transaction.rs b/transaction-context/src/transaction.rs
+index a69ec43e4..5920650ee 100644
+--- a/transaction-context/src/transaction.rs
++++ b/transaction-context/src/transaction.rs
+@@ -78,6 +78,10 @@ pub struct TransactionContext<'ix_data> {
+     /// Each entry in `instruction_data` represents the data for instruction at the corresponding
+     /// index.
+     instruction_data: Vec<Cow<'ix_data, [u8]>>,
++    /// Lattice fork: lamports created (positive) or destroyed (negative) by
++    /// the lattice-bridge builtin in this transaction. Only applied to bank
++    /// capitalization if the transaction succeeds.
++    native_supply_delta: Cell<i128>,
+ }
+ 
+ #[cfg(not(any(target_arch = "bpf", target_arch = "sbf")))]
+@@ -132,9 +136,44 @@ impl<'ix_data> TransactionContext<'ix_data> {
+             instruction_accounts: Vec::with_capacity(instruction_trace_capacity),
+             deduplication_maps: Vec::with_capacity(instruction_trace_capacity),
+             instruction_data: Vec::with_capacity(instruction_trace_capacity),
++            native_supply_delta: Cell::new(0),
+         }
+     }
+ 
++    /// Lattice fork: records that the currently executing instruction created
++    /// (`delta > 0`) or destroyed (`delta < 0`) native lamports, after it has
++    /// already credited or debited the corresponding instruction account.
++    ///
++    /// The lamport balance checks (`UnbalancedInstruction` in `push`/`pop` and
++    /// `UnbalancedTransaction` in the SVM) then accept exactly this imbalance.
++    /// Only the lattice-bridge builtin may call this, and only as a top-level
++    /// instruction; there is no syscall, so SBF programs cannot reach it.
++    pub fn record_native_supply_change(&self, delta: i128) -> Result<(), InstructionError> {
++        if self.get_instruction_stack_height() != 1 {
++            return Err(InstructionError::CallDepth);
++        }
++        let program_id = *self.get_current_instruction_context()?.get_program_key()?;
++        if program_id != crate::LATTICE_BRIDGE_PROGRAM_ID {
++            return Err(InstructionError::IncorrectProgramId);
++        }
++        let total = self
++            .native_supply_delta
++            .get()
++            .checked_add(delta)
++            .ok_or(InstructionError::ArithmeticOverflow)?;
++        let negated = delta
++            .checked_neg()
++            .ok_or(InstructionError::ArithmeticOverflow)?;
++        self.accounts.add_lamports_delta(negated)?;
++        self.native_supply_delta.set(total);
++        Ok(())
++    }
++
++    /// Lattice fork: net native lamports created by this transaction so far.
++    pub fn native_supply_delta(&self) -> i128 {
++        self.native_supply_delta.get()
++    }
++
+     /// Used in mock_process_instruction
+     pub fn deconstruct_without_keys(self) -> Result<Vec<AccountSharedData>, InstructionError> {
+         if !self.instruction_stack.is_empty() {
+@@ -675,12 +714,15 @@ pub struct ExecutionRecord {
+     /// Parallel to `accounts`: whether each account was modified by the VM.
+     pub touched_flags: Box<[bool]>,
+     pub accounts_resize_delta: i64,
++    /// Lattice fork: see `TransactionContext::record_native_supply_change`.
++    pub native_supply_delta: i128,
+ }
+ 
+ /// Used by the bank in the runtime to write back the processed accounts and recorded instructions
+ #[cfg(not(any(target_arch = "bpf", target_arch = "sbf")))]
+ impl From<TransactionContext<'_>> for ExecutionRecord {
+     fn from(context: TransactionContext) -> Self {
++        let native_supply_delta = context.native_supply_delta.get();
+         let (accounts, touched_flags, resize_delta) = Rc::try_unwrap(context.accounts)
+             .expect("transaction_context.accounts has unexpected outstanding refs")
+             .take();
+@@ -705,6 +747,7 @@ impl From<TransactionContext<'_>> for ExecutionRecord {
+             return_data,
+             touched_flags,
+             accounts_resize_delta: Cell::into_inner(resize_delta),
++            native_supply_delta,
+         }
+     }
+ }
+@@ -756,6 +799,96 @@ mod tests {
+         assert_eq!(build_transaction_context(account).push(), Ok(()),);
+     }
+ 
++    fn native_supply_context(program_id: Pubkey) -> TransactionContext<'static> {
++        let mut transaction_context = TransactionContext::new(
++            vec![
++                (program_id, AccountSharedData::default()),
++                (
++                    Pubkey::new_unique(),
++                    AccountSharedData::new(1_000, 0, &Pubkey::new_unique()),
++                ),
++            ],
++            Rent::default(),
++            20,
++            20,
++            1,
++        );
++        transaction_context
++            .configure_top_level_instruction_for_tests(
++                0,
++                vec![InstructionAccount::new(1, false, true)],
++                vec![],
++            )
++            .unwrap();
++        transaction_context.push().unwrap();
++        transaction_context
++    }
++
++    fn credit_first_instruction_account(transaction_context: &TransactionContext, lamports: u64) {
++        let instruction_context = transaction_context
++            .get_current_instruction_context()
++            .unwrap();
++        let mut account = instruction_context
++            .try_borrow_instruction_account(0)
++            .unwrap();
++        account.checked_add_lamports(lamports).unwrap();
++    }
++
++    #[test]
++    fn test_native_supply_change_balances_instruction() {
++        let mut transaction_context = native_supply_context(crate::LATTICE_BRIDGE_PROGRAM_ID);
++        credit_first_instruction_account(&transaction_context, 250);
++        transaction_context.record_native_supply_change(250).unwrap();
++        assert_eq!(transaction_context.pop(), Ok(()));
++        let record = ExecutionRecord::from(transaction_context);
++        assert_eq!(record.native_supply_delta, 250);
++        assert_eq!(record.accounts.get(1).unwrap().1.lamports(), 1_250);
++    }
++
++    #[test]
++    fn test_unrecorded_mint_is_unbalanced() {
++        let mut transaction_context = native_supply_context(crate::LATTICE_BRIDGE_PROGRAM_ID);
++        credit_first_instruction_account(&transaction_context, 250);
++        assert_eq!(
++            transaction_context.pop(),
++            Err(InstructionError::UnbalancedInstruction)
++        );
++    }
++
++    #[test]
++    fn test_native_supply_change_wrong_amount_is_unbalanced() {
++        let mut transaction_context = native_supply_context(crate::LATTICE_BRIDGE_PROGRAM_ID);
++        credit_first_instruction_account(&transaction_context, 250);
++        transaction_context.record_native_supply_change(249).unwrap();
++        assert_eq!(
++            transaction_context.pop(),
++            Err(InstructionError::UnbalancedInstruction)
++        );
++    }
++
++    #[test]
++    fn test_native_supply_change_rejects_other_programs() {
++        let transaction_context = native_supply_context(Pubkey::new_unique());
++        assert_eq!(
++            transaction_context.record_native_supply_change(1),
++            Err(InstructionError::IncorrectProgramId)
++        );
++        assert_eq!(transaction_context.native_supply_delta(), 0);
++    }
++
++    #[test]
++    fn test_native_supply_change_rejects_cpi() {
++        let mut transaction_context = native_supply_context(crate::LATTICE_BRIDGE_PROGRAM_ID);
++        transaction_context
++            .configure_next_cpi_for_tests(0, vec![InstructionAccount::new(1, false, true)], vec![])
++            .unwrap();
++        transaction_context.push().unwrap();
++        assert_eq!(
++            transaction_context.record_native_supply_change(1),
++            Err(InstructionError::CallDepth)
++        );
++    }
++
+     #[test]
+     fn test_invalid_native_loader_index() {
+         let mut transaction_context = TransactionContext::new(
+-- 
+2.51.0
+

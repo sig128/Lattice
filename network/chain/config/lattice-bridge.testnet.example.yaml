@@ -1,0 +1,19 @@
+# Lattice testnet bridge genesis config (example).
+# Used by: chain/scripts/lattice-genesis.sh --network testnet --config <this>
+# A testnet faucet is allowed; all lamports not covered by bootstrap deposits
+# are recorded on-chain as genesis_unbacked_native and are NOT redeemable.
+
+deployment_label: "lattice-testnet-1"
+# Solana devnet genesis hash (pair a Lattice testnet with a Solana devnet vault).
+solana_genesis_hash: "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"
+source_program_id: "REPLACE_WITH_DEVNET_SOURCE_VAULT_PROGRAM_ID"
+source_mint: "REPLACE_WITH_DEVNET_SPL_MINT"
+source_decimals: 6
+guardian_scheme: ed25519
+guardian_threshold: 2
+guardians:
+  - ed25519: "REPLACE_GUARDIAN_1_ED25519_BASE58"
+  - ed25519: "REPLACE_GUARDIAN_2_ED25519_BASE58"
+  - ed25519: "REPLACE_GUARDIAN_3_ED25519_BASE58"
+max_mint_per_epoch_lamports: 1000000000000000   # 1,000,000 LAT
+bootstrap_deposits: []

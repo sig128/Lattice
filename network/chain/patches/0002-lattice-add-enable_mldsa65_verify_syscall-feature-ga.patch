@@ -1,0 +1,91 @@
+From 3df77b90c4b2d6636df1116681e3f55374c5a439 Mon Sep 17 00:00:00 2001
+From: Lattice PQ <pq@lattice.local>
+Date: Thu, 8 Oct 2026 22:03:28 +0200
+Subject: [PATCH 2/3] lattice: add enable_mldsa65_verify_syscall feature gate
+
+Feature id 2e8mniAJiRxZz5JFAU2mX8KzCN6Z16GRGkBD7fnPF62P =
+base58(sha256("lattice:feature:enable_mldsa65_verify_syscall:v1")).
+Plumbed through FeatureSnapshot and SVMFeatureSet. Adding it changes the
+feature-set id, so this fork does not interoperate with upstream clusters.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+---
+ feature-set/src/lib.rs     | 13 +++++++++++++
+ svm-feature-set/src/lib.rs |  2 ++
+ 2 files changed, 15 insertions(+)
+
+diff --git a/feature-set/src/lib.rs b/feature-set/src/lib.rs
+index e2e4d4fb1..b0cd6e3e4 100644
+--- a/feature-set/src/lib.rs
++++ b/feature-set/src/lib.rs
+@@ -83,6 +83,7 @@ pub struct FeatureSnapshot {
+     pub define_ltds_fee_only_semantics: bool,
+     pub upgrade_bpf_stake_program_to_v5_1: bool,
+     pub relax_fee_payer_constraint: bool,
++    pub enable_mldsa65_verify_syscall: bool,
+ }
+ 
+ impl From<&AHashMap<Pubkey, u64>> for FeatureSnapshot {
+@@ -186,6 +187,7 @@ impl From<&AHashMap<Pubkey, u64>> for FeatureSnapshot {
+             define_ltds_fee_only_semantics: is_active(&define_ltds_fee_only_semantics::ID),
+             upgrade_bpf_stake_program_to_v5_1: is_active(&upgrade_bpf_stake_program_to_v5_1::ID),
+             relax_fee_payer_constraint: is_active(&relax_fee_payer_constraint::ID),
++            enable_mldsa65_verify_syscall: is_active(&enable_mldsa65_verify_syscall::ID),
+         }
+     }
+ }
+@@ -347,6 +349,7 @@ impl FeatureSet {
+             relax_post_exec_min_balance_check: snapshot.relax_post_exec_min_balance_check,
+             define_ltds_fee_only_semantics: snapshot.define_ltds_fee_only_semantics,
+             relax_fee_payer_constraint: snapshot.relax_fee_payer_constraint,
++            enable_mldsa65_verify_syscall: snapshot.enable_mldsa65_verify_syscall,
+         }
+     }
+ }
+@@ -1534,6 +1537,12 @@ pub mod relax_fee_payer_constraint {
+     solana_pubkey::declare_id!("FEEXbxUuKobtrt1qNK5pjtzbPQhsppBTrNNG74xu4mai");
+ }
+ 
++/// Lattice experimental fork: `sol_mldsa65_verify` syscall (ML-DSA-65, FIPS 204).
++/// Id = base58(sha256("lattice:feature:enable_mldsa65_verify_syscall:v1")).
++pub mod enable_mldsa65_verify_syscall {
++    solana_pubkey::declare_id!("2e8mniAJiRxZz5JFAU2mX8KzCN6Z16GRGkBD7fnPF62P");
++}
++
+ pub mod double_disinflation_rate {
+     solana_pubkey::declare_id!("55oikhjJ2LUi1xdgJ17ueRyHFURZEw32asT3iAKfh7gg");
+     /// Taper (yearly disinflation rate) applied from activation onward.
+@@ -2626,6 +2635,10 @@ pub static FEATURE_NAMES: LazyLock<AHashMap<Pubkey, &'static str>> = LazyLock::n
+             double_disinflation_rate::id(),
+             "SIMD-0550: Double disinflation rate",
+         ),
++        (
++            enable_mldsa65_verify_syscall::id(),
++            "Lattice: ML-DSA-65 verify syscall (experimental fork)",
++        ),
+         /*************** ADD NEW FEATURES HERE ***************/
+         /***** ADD NEW FEATURE BOOL TO `FeatureSnapshot` *****/
+     ]
+diff --git a/svm-feature-set/src/lib.rs b/svm-feature-set/src/lib.rs
+index 7b0f8084d..1e5d29448 100644
+--- a/svm-feature-set/src/lib.rs
++++ b/svm-feature-set/src/lib.rs
+@@ -51,6 +51,7 @@ pub struct SVMFeatureSet {
+     pub relax_post_exec_min_balance_check: bool,
+     pub define_ltds_fee_only_semantics: bool,
+     pub relax_fee_payer_constraint: bool,
++    pub enable_mldsa65_verify_syscall: bool,
+ }
+ 
+ impl SVMFeatureSet {
+@@ -106,6 +107,7 @@ impl SVMFeatureSet {
+             relax_post_exec_min_balance_check: true,
+             define_ltds_fee_only_semantics: true,
+             relax_fee_payer_constraint: true,
++            enable_mldsa65_verify_syscall: true,
+         }
+     }
+ }
+-- 
+2.51.0
+

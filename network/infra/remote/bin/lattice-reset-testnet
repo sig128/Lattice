@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Guarded testnet reset: replaces the ledger with a fresh genesis.
+#
+#   sudo lattice-reset-testnet --confirm-genesis <current-genesis-hash> [--purge]
+#
+# Refuses unless LATTICE_ENVIRONMENT=testnet, the given hash equals the live
+# (or recorded) genesis, and the operator types the confirmation phrase on a
+# terminal. Takes a backup first, archives the old ledger (deleted with
+# --purge), archives validator keys, clears genesis-bound bridge demo state,
+# starts a new genesis, records it, and rebuilds the website for it.
+# All balances, accounts and history on the testnet are lost.
+set -euo pipefail
+# shellcheck source=SCRIPTDIR/../lib/common.sh
+. /usr/local/lib/lattice/common.sh
+LATTICE_LOG_TAG=lattice-reset
+require_root
+
+confirm=""
+purge=0
+while (($#)); do
+  case "$1" in
+    --confirm-genesis) confirm="$2"; shift 2 ;;
+    --purge) purge=1; shift ;;
+    *) die "unknown argument $1" ;;
+  esac
+done
+
+[[ "$(env_get LATTICE_ENVIRONMENT)" == "testnet" ]] || die "reset is only permitted when LATTICE_ENVIRONMENT=testnet"
+live="$(rpc_call getGenesisHash 2>/dev/null || env_get NEXT_PUBLIC_NATIVE_GENESIS_HASH)"
+[[ -n "${live}" ]] || die "cannot determine the current genesis"
+[[ "${confirm}" == "${live}" ]] || die "pass --confirm-genesis ${live} (the current genesis) to proceed"
+[[ -t 0 ]] || die "interactive confirmation required (run from a terminal: ssh -t ...)"
+phrase="RESET ${live:0:8}"
+read -r -p "Type '${phrase}' to destroy testnet ${live}: " typed
+[[ "${typed}" == "${phrase}" ]] || die "confirmation did not match; nothing changed"
+
+take_lock lattice-reset
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+log "backing up before reset"
+"${LATTICE_LIB}/bin/lattice-backup" || warn "pre-reset backup failed; continuing (keys are archived below)"
+
+systemctl stop lattice-recorder lattice-monitor lattice-validator || true
+if (( purge )); then
+  rm -rf "${LATTICE_LEDGER}"
+else
+  mv "${LATTICE_LEDGER}" "${LATTICE_HOME}/ledger.reset-${stamp}"
+  log "old ledger kept at ${LATTICE_HOME}/ledger.reset-${stamp} (delete it to reclaim space)"
+fi
+install -d -m 0750 -o "${LATTICE_USER}" -g "${LATTICE_USER}" "${LATTICE_LEDGER}"
+
+archive="${LATTICE_KEYS}/archive/reset-${stamp}"
+install -d -m 0700 -o "${LATTICE_USER}" -g "${LATTICE_USER}" "${archive}"
+for name in "${LATTICE_VALIDATOR_KEYFILES[@]}"; do
+  [[ -f "${LATTICE_KEYS}/${name}" ]] && mv "${LATTICE_KEYS}/${name}" "${archive}/${name}"
+done
+if [[ -d "${LATTICE_BRIDGE_DATA}" ]]; then
+  mv "${LATTICE_BRIDGE_DATA}" "${LATTICE_HOME}/bridge/data.reset-${stamp}"
+  install -d -m 0700 -o "${LATTICE_USER}" -g "${LATTICE_USER}" "${LATTICE_BRIDGE_DATA}"
+fi
+
+systemctl start lattice-validator
+wait_for_rpc 900 || die "new validator did not become healthy (journalctl -u lattice-validator)"
+relocate_validator_keys
+genesis="$(record_genesis)" || die "could not record the new genesis"
+alert notice "testnet reset: ${live} -> ${genesis}"
+log "rebuilding the website for genesis ${genesis}"
+"${LATTICE_LIB}/bin/lattice-release" "$(readlink -f "${LATTICE_CURRENT}")" --label "reset-${stamp}"
+log "reset complete. Bridge demo state was cleared; recreate it per RUNBOOK.md if wanted."

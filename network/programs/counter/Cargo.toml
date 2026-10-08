@@ -1,0 +1,14 @@
+[package]
+name = "lattice-counter"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+solana-program = "=4.0.0"
+
+[features]
+no-entrypoint = []

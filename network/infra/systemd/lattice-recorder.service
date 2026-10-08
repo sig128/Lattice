@@ -1,0 +1,44 @@
+[Unit]
+Description=Lattice bridge reconciliation recorder (operator-attested demo)
+After=network-online.target lattice-validator.service
+# The recorder needs state created by `pnpm --filter @lattice/bridge setup:local`
+# against this host's validator; without it the unit is skipped, not failed.
+ConditionPathExists=/var/lib/lattice/bridge/data/local-state.json
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=lattice
+Group=lattice
+WorkingDirectory=/opt/lattice/current/services/bridge
+EnvironmentFile=/etc/lattice/lattice.env
+EnvironmentFile=/etc/lattice/internal.env
+ExecStart=/usr/local/bin/node --import tsx src/recorder.ts
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=30
+SyslogIdentifier=lattice-recorder
+
+MemoryHigh=384M
+MemoryMax=512M
+TasksMax=128
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=-/var/lib/lattice/bridge -/var/lib/lattice/keys/bridge
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+IPAddressDeny=any
+IPAddressAllow=localhost
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

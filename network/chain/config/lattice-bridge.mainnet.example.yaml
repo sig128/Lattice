@@ -1,0 +1,46 @@
+# Lattice mainnet bridge genesis config (example; every REPLACE_ value must
+# be filled in, and solana-genesis rejects the file until it is).
+# Used by: chain/scripts/lattice-genesis.sh --network mainnet --config <this>
+# Semantics: docs/NATIVE_ISSUANCE.md and docs/BRIDGE_SPEC.md.
+
+# deployment_id = sha256("lattice-bridge/1:deployment" || label). Must equal
+# the source-vault deployment_id on Solana.
+deployment_label: "lattice-mainnet-1"
+
+# Solana mainnet-beta genesis hash.
+solana_genesis_hash: "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+source_program_id: "REPLACE_WITH_SOURCE_VAULT_PROGRAM_ID"
+source_mint: "REPLACE_WITH_SPL_MINT"
+source_decimals: 6
+
+# Guardian epoch 1. ed25519 | mldsa65 | hybrid. Hybrid = each guardian must
+# provide BOTH a valid Ed25519 and a valid ML-DSA-65 signature to count.
+# Rules: 1..=19 guardians, threshold >= 2 and 2*threshold > count.
+guardian_scheme: hybrid
+guardian_threshold: 3
+guardians:
+  - ed25519: "REPLACE_GUARDIAN_1_ED25519_BASE58"
+    mldsa65: "REPLACE_GUARDIAN_1_MLDSA65_PUBLIC_KEY_BASE64_1952_BYTES"
+  - ed25519: "REPLACE_GUARDIAN_2_ED25519_BASE58"
+    mldsa65: "REPLACE_GUARDIAN_2_MLDSA65_PUBLIC_KEY_BASE64_1952_BYTES"
+  - ed25519: "REPLACE_GUARDIAN_3_ED25519_BASE58"
+    mldsa65: "REPLACE_GUARDIAN_3_MLDSA65_PUBLIC_KEY_BASE64_1952_BYTES"
+  - ed25519: "REPLACE_GUARDIAN_4_ED25519_BASE58"
+    mldsa65: "REPLACE_GUARDIAN_4_MLDSA65_PUBLIC_KEY_BASE64_1952_BYTES"
+  - ed25519: "REPLACE_GUARDIAN_5_ED25519_BASE58"
+    mldsa65: "REPLACE_GUARDIAN_5_MLDSA65_PUBLIC_KEY_BASE64_1952_BYTES"
+
+# Optional key that may only PAUSE deposits/withdrawals (never unpause).
+pauser: "REPLACE_WITH_PAUSER_PUBKEY"
+
+# Per-epoch cap on minted lamports (LAT has 9 decimals). 0 disables minting.
+max_mint_per_epoch_lamports: 100000000000000   # 100,000 LAT
+
+# Every genesis lamport must be backed. List source-vault deposits that are
+# finalized on Solana before launch; each becomes a pre-consumed mint record
+# (it can never be minted again). Excess backing goes to this system account.
+bootstrap_surplus_recipient: "REPLACE_WITH_OPERATOR_PUBKEY"
+bootstrap_deposits:
+  - sequence: 0
+    source_amount: 0          # REPLACE: credited source atomic units of deposit 0
+    recipient: "REPLACE_WITH_OPERATOR_PUBKEY"

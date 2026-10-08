@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Disk guard (cron, every 5 minutes). Alerts at LATTICE_DISK_WARN_PCT and
+# LATTICE_DISK_CRIT_PCT root-filesystem usage or LATTICE_LEDGER_WARN_GB ledger
+# size. At LATTICE_DISK_STOP_PCT or LATTICE_LEDGER_STOP_GB it stops the
+# validator (the only component that can grow without bound) and writes a
+# guard flag that keeps it stopped, including across reboots, until an
+# operator removes /var/lib/lattice/state/disk-guard-tripped.
+set -euo pipefail
+# shellcheck source=SCRIPTDIR/../lib/common.sh
+. /usr/local/lib/lattice/common.sh
+LATTICE_LOG_TAG=lattice-disk
+require_root
+
+warn_pct="$(env_get LATTICE_DISK_WARN_PCT)"; warn_pct="${warn_pct:-75}"
+crit_pct="$(env_get LATTICE_DISK_CRIT_PCT)"; crit_pct="${crit_pct:-85}"
+stop_pct="$(env_get LATTICE_DISK_STOP_PCT)"; stop_pct="${stop_pct:-92}"
+ledger_warn="$(env_get LATTICE_LEDGER_WARN_GB)"; ledger_warn="${ledger_warn:-60}"
+ledger_stop="$(env_get LATTICE_LEDGER_STOP_GB)"; ledger_stop="${ledger_stop:-120}"
+
+used_pct="$(df --output=pcent / | tail -1 | tr -dc '0-9')"
+ledger_gb="$(du -s --block-size=1G "${LATTICE_LEDGER}" 2>/dev/null | cut -f1)"
+ledger_gb="${ledger_gb:-0}"
+top="$(du -s --block-size=1G "${LATTICE_LEDGER}" "${LATTICE_HOME}/build" "${LATTICE_BACKUPS}" /var/log /opt/lattice 2>/dev/null | sort -rn | head -4 | awk '{ printf "%s=%sG ", $2, $1 }')"
+summary="root ${used_pct}% used, ledger ${ledger_gb}G; largest: ${top}"
+
+level=ok
+priority=warning
+if (( used_pct >= stop_pct || ledger_gb >= ledger_stop )); then
+  level=stop
+  priority=crit
+elif (( used_pct >= crit_pct )); then
+  level=critical
+  priority=crit
+elif (( used_pct >= warn_pct || ledger_gb >= ledger_warn )); then
+  level=warning
+fi
+
+if [[ "${level}" == "stop" && ! -f "${LATTICE_DISK_GUARD_FLAG}" ]]; then
+  printf '%s %s\n' "$(date -u +%FT%TZ)" "${summary}" >"${LATTICE_DISK_GUARD_FLAG}"
+  systemctl stop lattice-validator || true
+  alert crit "disk guard STOPPED lattice-validator: ${summary}. Free space, then remove ${LATTICE_DISK_GUARD_FLAG} and start the validator"
+fi
+
+alert_on_change disk "${level}" 21600 "${summary}" "${priority}"
+jq -n --arg level "${level}" --argjson used "${used_pct}" --argjson ledger "${ledger_gb}" --arg at "$(date -u +%FT%TZ)" \
+  '{level: $level, rootUsedPercent: $used, ledgerGiB: $ledger, checkedAt: $at}' >"${LATTICE_STATE}/disk.json"
+echo "${level}: ${summary}"

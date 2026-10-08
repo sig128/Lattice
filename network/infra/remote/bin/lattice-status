@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# One-screen summary of the Lattice testnet host. Read-only.
+set -uo pipefail
+# shellcheck source=SCRIPTDIR/../lib/common.sh
+. /usr/local/lib/lattice/common.sh
+
+echo "== services"
+for unit in lattice-validator "${LATTICE_APP_UNITS[@]}" lattice-edge-limits caddy postgresql lattice-fork-build; do
+  printf '  %-22s %s\n' "${unit}" "$(systemctl is-active "${unit}" 2>/dev/null)"
+done
+
+echo "== network"
+printf '  environment   %s\n' "$(env_get LATTICE_ENVIRONMENT)"
+printf '  genesis       %s\n' "$(rpc_call getGenesisHash 2>/dev/null || echo unavailable)"
+printf '  configured    %s\n' "$(env_get NEXT_PUBLIC_NATIVE_GENESIS_HASH)"
+printf '  slot          %s\n' "$(rpc_call getSlot 2>/dev/null || echo unavailable)"
+printf '  health        %s\n' "$(rpc_call getHealth 2>/dev/null || echo unavailable)"
+printf '  version       %s\n' "$(rpc_call getVersion 2>/dev/null | jq -r '."solana-core"' 2>/dev/null || echo unavailable)"
+printf '  binary        %s\n' "$(readlink -f "${LATTICE_BIN_DIR}/solana-test-validator" 2>/dev/null)"
+
+echo "== public URLs"
+printf '  site          %s\n' "$(env_get LATTICE_SITE_URL)"
+printf '  JSON-RPC      %s\n' "$(env_get NEXT_PUBLIC_NATIVE_HTTP_RPC)"
+printf '  WebSocket     %s\n' "$(env_get NEXT_PUBLIC_NATIVE_WS_RPC)"
+printf '  edge mode     %s (ip tls: %s)\n' "$(cat "${LATTICE_STATE}/edge-mode" 2>/dev/null)" "$(cat "${LATTICE_STATE}/ip-tls" 2>/dev/null)"
+
+echo "== release"
+printf '  current       %s\n' "$(basename "$(readlink -f "${LATTICE_CURRENT}" 2>/dev/null)")"
+printf '  available     %s\n' "$(find "${LATTICE_RELEASES}" -mindepth 1 -maxdepth 1 -type d -printf '%f ' 2>/dev/null)"
+
+echo "== resources"
+df -h / | awk 'NR == 2 { printf "  disk /        %s used of %s (%s)\n", $3, $2, $5 }'
+printf '  ledger        %s\n' "$(du -sh "${LATTICE_LEDGER}" 2>/dev/null | cut -f1)"
+printf '  journal       %s\n' "$(journalctl --disk-usage 2>/dev/null | grep -o '[0-9.]*[KMGT]' | head -1)"
+free -h | awk '/^Mem/ { printf "  memory        %s used of %s\n", $3, $2 } /^Swap/ { printf "  swap          %s used of %s\n", $3, $2 }'
+printf '  load          %s\n' "$(cut -d' ' -f1-3 /proc/loadavg)"
+[[ -f "${LATTICE_DISK_GUARD_FLAG}" ]] && echo "  DISK GUARD TRIPPED: $(cat "${LATTICE_DISK_GUARD_FLAG}")"
+[[ -f /var/run/reboot-required ]] && echo "  reboot required for updates"
+[[ -e "${LATTICE_LOG_DIR}/fork-build.log" ]] && printf '  fork build    %s\n' "$(tail -n 1 "${LATTICE_LOG_DIR}/fork-build.log" 2>/dev/null | cut -c1-100)"
+exit 0

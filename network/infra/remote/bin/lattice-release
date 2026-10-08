@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# Build and activate an application release (website, monitor, recorder).
+#
+#   lattice-release <source-dir> [--label <text>]
+#
+# Copies <source-dir> into /opt/lattice/releases/<id>, runs
+# `pnpm install --frozen-lockfile` and the web build as the lattice user with
+# /etc/lattice/lattice.env loaded (NEXT_PUBLIC_* values are compiled in), then
+# atomically repoints /opt/lattice/current, restarts the app units, and health
+# checks the site. A failed health check rolls back to the previous release.
+# The validator is not touched. Keeps the newest 4 releases.
+set -euo pipefail
+# shellcheck source=SCRIPTDIR/../lib/common.sh
+. /usr/local/lib/lattice/common.sh
+LATTICE_LOG_TAG=lattice-release
+
+require_root
+source_dir=""
+label="deploy"
+while (($#)); do
+  case "$1" in
+    --label) label="$2"; shift 2 ;;
+    -*) die "unknown option $1" ;;
+    *) source_dir="$1"; shift ;;
+  esac
+done
+[[ -n "${source_dir}" && -d "${source_dir}" ]] || die "usage: lattice-release <source-dir> [--label <text>]"
+source_dir="$(cd "${source_dir}" && pwd -P)"
+[[ -f "${source_dir}/pnpm-lock.yaml" ]] || die "${source_dir} does not look like the Lattice repository"
+take_lock lattice-release
+load_env
+[[ "${LATTICE_ENVIRONMENT}" == "testnet" ]] || die "LATTICE_ENVIRONMENT must be testnet"
+[[ -n "${NEXT_PUBLIC_NATIVE_GENESIS_HASH:-}" ]] || die "NEXT_PUBLIC_NATIVE_GENESIS_HASH is empty; start the validator first"
+
+id="$(date -u +%Y%m%dT%H%M%SZ)"
+release="${LATTICE_RELEASES}/${id}"
+build_log="${LATTICE_LOG_DIR}/release-${id}.log"
+previous="$(readlink -f "${LATTICE_CURRENT}" 2>/dev/null || true)"
+install -d -m 0755 -o "${LATTICE_USER}" -g "${LATTICE_USER}" "${LATTICE_RELEASES}"
+install -d -m 0750 -o "${LATTICE_USER}" -g "${LATTICE_USER}" "${LATTICE_LOG_DIR}"
+
+log "creating release ${id} from ${source_dir} (log ${build_log})"
+rsync -a --delete \
+  --exclude=/chain/agave/ --exclude=/chain/ledger/ --exclude=node_modules/ --exclude=.next/ \
+  --exclude=target/ --exclude=/keys/ --exclude=/services/bridge/data/ --exclude=.lattice-release.json \
+  "${source_dir}/" "${release}/"
+chown -R "${LATTICE_USER}:${LATTICE_USER}" "${release}"
+
+# Genesis-bound bridge demo state and its keys live outside releases.
+install -d -m 0700 -o "${LATTICE_USER}" -g "${LATTICE_USER}" "${LATTICE_BRIDGE_DATA}" "${LATTICE_KEYS}/bridge"
+ln -sfn "${LATTICE_BRIDGE_DATA}" "${release}/services/bridge/data"
+ln -sfn "${LATTICE_KEYS}/bridge" "${release}/keys"
+chown -h "${LATTICE_USER}:${LATTICE_USER}" "${release}/services/bridge/data" "${release}/keys"
+
+if ! as_lattice "
+  cd '${release}'
+  set -a; . '${LATTICE_ENV_FILE}'; set +a
+  unset NODE_ENV
+  echo '== pnpm install --frozen-lockfile'
+  pnpm install --frozen-lockfile
+  echo '== pnpm --filter @lattice/web build'
+  pnpm --filter @lattice/web build
+" >"${build_log}" 2>&1; then
+  tail -n 40 "${build_log}" >&2 || true
+  rm -rf "${release}"
+  die "release build failed; previous release left active (full log ${build_log})"
+fi
+
+jq -n --arg id "${id}" --arg label "${label}" --arg source "${source_dir}" \
+  --arg genesis "${NEXT_PUBLIC_NATIVE_GENESIS_HASH}" --arg http "${NEXT_PUBLIC_NATIVE_HTTP_RPC}" \
+  --arg ws "${NEXT_PUBLIC_NATIVE_WS_RPC}" --arg site "${LATTICE_SITE_URL:-}" --arg at "$(date -u +%FT%TZ)" \
+  '{id: $id, label: $label, source: $source, builtAt: $at, environment: "testnet",
+    genesisHash: $genesis, httpRpc: $http, wsRpc: $ws, siteUrl: $site}' \
+  >"${release}/.lattice-release.json"
+chown "${LATTICE_USER}:${LATTICE_USER}" "${release}/.lattice-release.json"
+
+activate() {
+  local target="$1"
+  ln -sfn "${target}" "${LATTICE_CURRENT}.new"
+  mv -Tf "${LATTICE_CURRENT}.new" "${LATTICE_CURRENT}"
+  systemctl daemon-reload
+  systemctl restart lattice-gateway lattice-web lattice-monitor
+  # Skipped (not failed) until bridge demo state exists.
+  systemctl restart lattice-recorder || true
+}
+
+web_healthy() {
+  for _ in $(seq 1 30); do
+    if curl -fsS --max-time 5 -o /dev/null http://127.0.0.1:3000/ \
+      && curl -fsS --max-time 5 -o /dev/null http://127.0.0.1:3000/api/network-manifest; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+activate "${release}"
+if ! web_healthy; then
+  journalctl -u lattice-web -n 40 --no-pager >&2 || true
+  if [[ -n "${previous}" && -d "${previous}" ]]; then
+    warn "release ${id} failed its health check; rolling back to $(basename "${previous}")"
+    activate "${previous}"
+    web_healthy || warn "previous release is not healthy either"
+  fi
+  die "release ${id} is unhealthy"
+fi
+log "release ${id} active: $(jq -c . "${release}/.lattice-release.json")"
+
+# Retention: newest 4 releases, never the active or the previous one.
+mapfile -t releases < <(find "${LATTICE_RELEASES}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -r)
+for old in "${releases[@]:4}"; do
+  [[ "${LATTICE_RELEASES}/${old}" == "${previous}" ]] && continue
+  log "pruning release ${old}"
+  rm -rf "${LATTICE_RELEASES:?}/${old}"
+done
+find "${LATTICE_LOG_DIR}" -name 'release-*.log' -mtime +30 -delete

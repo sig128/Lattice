@@ -1,0 +1,758 @@
+From 4b110cf312dc1df4e724d58ebe7f87c8d9315e0a Mon Sep 17 00:00:00 2001
+From: Lattice Bridge <bridge@lattice.local>
+Date: Thu, 8 Oct 2026 23:43:33 +0200
+Subject: [PATCH 6/7] lattice: solana-genesis --lattice-network mainnet|testnet
+
+Adds --lattice-network, --lattice-bridge-config (YAML/JSON) and
+--lattice-runtime-reserve-lamports to solana-genesis. In Lattice mode:
+
+- --cluster-type development is required, so no Solana genesis stake
+  allocations are added and no feature set is cloned over RPC;
+- enable_lattice_bridge_program must be active and cannot be deactivated;
+- the lattice-bridge state, initial guardian set (epoch 1) and one
+  pre-consumed LATMINT1 record per bootstrap deposit are added last;
+- mainnet: no faucet, inflation disabled, and genesis lamports plus the
+  runtime reserve must be covered by bootstrap deposits (excess backing is
+  credited to bootstrap_surplus_recipient); otherwise genesis fails;
+- testnet: faucet allowed; uncovered lamports are written to the bridge
+  state as genesis_unbacked_native and printed as UNBACKED.
+
+Unaudited.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+---
+ Cargo.lock             |   1 +
+ genesis/Cargo.toml     |   1 +
+ genesis/src/lattice.rs | 536 +++++++++++++++++++++++++++++++++++++++++
+ genesis/src/lib.rs     |   1 +
+ genesis/src/main.rs    |  91 ++++++-
+ 5 files changed, 629 insertions(+), 1 deletion(-)
+ create mode 100644 genesis/src/lattice.rs
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 18755e628..14d471c57 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -8657,6 +8657,7 @@ dependencies = [
+  "solana-genesis-utils",
+  "solana-inflation",
+  "solana-keypair",
++ "solana-lattice-bridge-program",
+  "solana-ledger",
+  "solana-loader-v3-interface",
+  "solana-native-token",
+diff --git a/genesis/Cargo.toml b/genesis/Cargo.toml
+index 5c1749ec0..187616075 100644
+--- a/genesis/Cargo.toml
++++ b/genesis/Cargo.toml
+@@ -53,6 +53,7 @@ solana-genesis-config = { workspace = true }
+ solana-genesis-utils = { workspace = true }
+ solana-inflation = { workspace = true }
+ solana-keypair = { workspace = true }
++solana-lattice-bridge-program = { workspace = true }
+ solana-ledger = { workspace = true }
+ solana-loader-v3-interface = { workspace = true }
+ solana-native-token = { workspace = true }
+diff --git a/genesis/src/lattice.rs b/genesis/src/lattice.rs
+new file mode 100644
+index 000000000..3a8818295
+--- /dev/null
++++ b/genesis/src/lattice.rs
+@@ -0,0 +1,536 @@
++//! Lattice fork: `solana-genesis --lattice-network mainnet|testnet`.
++//!
++//! Adds the lattice-bridge accounts (state, initial guardian set,
++//! pre-consumed bootstrap mint records) and enforces the genesis supply
++//! policy of docs/NATIVE_ISSUANCE.md:
++//!
++//! - mainnet: no faucet, inflation disabled, and every genesis lamport plus
++//!   the runtime reserve must be backed by bootstrap deposits finalized on
++//!   Solana; any excess backing is credited to `bootstrap_surplus_recipient`
++//!   so genesis supply equals the backing (up to the reserve estimate);
++//! - testnet: faucet allowed; lamports not covered by bootstrap deposits are
++//!   recorded in the bridge state as `genesis_unbacked_native`.
++
++use {
++    base64::{Engine, prelude::BASE64_STANDARD},
++    serde::Deserialize,
++    solana_account::{Account, AccountSharedData},
++    solana_cluster_type::ClusterType,
++    solana_genesis_config::GenesisConfig,
++    solana_inflation::Inflation,
++    solana_lattice_bridge_program::{
++        genesis::{
++            BootstrapDeposit, GenesisBridgeConfig, GenesisSupplyReport, build_genesis_accounts,
++        },
++        state::{self, GuardianSet, NETWORK_MAINNET, NETWORK_TESTNET},
++        wire::{self, GuardianKey},
++    },
++    solana_pubkey::Pubkey,
++    solana_sdk_ids::system_program,
++    std::{fs::File, str::FromStr},
++};
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum LatticeNetwork {
++    Mainnet,
++    Testnet,
++}
++
++impl LatticeNetwork {
++    pub const STRINGS: [&'static str; 2] = ["mainnet", "testnet"];
++
++    fn code(self) -> u8 {
++        match self {
++            Self::Mainnet => NETWORK_MAINNET,
++            Self::Testnet => NETWORK_TESTNET,
++        }
++    }
++}
++
++impl FromStr for LatticeNetwork {
++    type Err = String;
++    fn from_str(s: &str) -> Result<Self, String> {
++        match s {
++            "mainnet" => Ok(Self::Mainnet),
++            "testnet" => Ok(Self::Testnet),
++            other => Err(format!("unknown lattice network {other}")),
++        }
++    }
++}
++
++#[derive(Debug, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct GuardianEntry {
++    /// base58 Ed25519 public key (schemes ed25519 and hybrid).
++    #[serde(default)]
++    pub ed25519: Option<String>,
++    /// base64 ML-DSA-65 public key, 1952 bytes (schemes mldsa65 and hybrid).
++    #[serde(default)]
++    pub mldsa65: Option<String>,
++}
++
++#[derive(Debug, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct BootstrapEntry {
++    pub sequence: u64,
++    pub source_amount: u64,
++    pub recipient: String,
++}
++
++/// `--lattice-bridge-config` file (YAML or JSON).
++#[derive(Debug, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct LatticeBridgeConfigFile {
++    /// deployment_id = sha256("lattice-bridge/1:deployment" || label).
++    pub deployment_label: String,
++    /// base58 hashes/addresses.
++    pub solana_genesis_hash: String,
++    pub source_program_id: String,
++    pub source_mint: String,
++    pub source_decimals: u8,
++    /// "ed25519" | "mldsa65" | "hybrid".
++    pub guardian_scheme: String,
++    pub guardian_threshold: u8,
++    pub guardians: Vec<GuardianEntry>,
++    #[serde(default)]
++    pub pauser: Option<String>,
++    pub max_mint_per_epoch_lamports: u64,
++    #[serde(default)]
++    pub bootstrap_surplus_recipient: Option<String>,
++    #[serde(default)]
++    pub bootstrap_deposits: Vec<BootstrapEntry>,
++}
++
++#[derive(Debug)]
++pub struct LatticeGenesisReport {
++    pub network: LatticeNetwork,
++    pub deployment_id: [u8; 32],
++    pub state_address: Pubkey,
++    pub supply: GenesisSupplyReport,
++    pub surplus_credited: u64,
++    pub total_genesis_lamports: u64,
++}
++
++impl std::fmt::Display for LatticeGenesisReport {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        let s = &self.supply;
++        writeln!(f, "Lattice network:           {:?}", self.network)?;
++        writeln!(
++            f,
++            "Bridge program:            {}",
++            solana_lattice_bridge_program::id()
++        )?;
++        writeln!(f, "Bridge deployment id:      {}", hex(&self.deployment_id))?;
++        writeln!(f, "Bridge state account:      {}", self.state_address)?;
++        writeln!(f, "Backed by bootstrap (LAT lamports): {}", s.backed_native)?;
++        writeln!(
++            f,
++            "Genesis account lamports:  {}",
++            self.total_genesis_lamports
++        )?;
++        writeln!(
++            f,
++            "  of which bridge accounts: {}",
++            s.bridge_account_lamports
++        )?;
++        writeln!(f, "  of which surplus credit:  {}", self.surplus_credited)?;
++        writeln!(
++            f,
++            "Runtime reserve (slot 0):  {}",
++            s.runtime_reserve_lamports
++        )?;
++        write!(f, "UNBACKED lamports:         {}", s.unbacked_native)?;
++        if s.unbacked_native != 0 {
++            write!(f, "  <- testnet only; NOT redeemable on Solana")?;
++        }
++        Ok(())
++    }
++}
++
++fn hex(bytes: &[u8]) -> String {
++    bytes.iter().map(|b| format!("{b:02x}")).collect()
++}
++
++pub fn load_config(path: &str) -> Result<LatticeBridgeConfigFile, String> {
++    let file = File::open(path).map_err(|e| format!("{path}: {e}"))?;
++    serde_yaml::from_reader(file).map_err(|e| format!("{path}: {e}"))
++}
++
++fn decode32(value: &str, what: &str) -> Result<[u8; 32], String> {
++    Pubkey::from_str(value)
++        .map(|key| key.to_bytes())
++        .map_err(|e| format!("invalid {what} {value}: {e}"))
++}
++
++fn scheme_code(name: &str) -> Result<u8, String> {
++    match name {
++        "ed25519" => Ok(wire::SCHEME_ED25519),
++        "mldsa65" => Ok(wire::SCHEME_MLDSA65),
++        "hybrid" => Ok(wire::SCHEME_HYBRID),
++        other => Err(format!("unknown guardian_scheme {other}")),
++    }
++}
++
++pub fn to_bridge_config(
++    file: &LatticeBridgeConfigFile,
++    network: LatticeNetwork,
++) -> Result<GenesisBridgeConfig, String> {
++    let scheme = scheme_code(&file.guardian_scheme)?;
++    let deployment_id = wire::deployment_id(file.deployment_label.as_bytes());
++    let keys = file
++        .guardians
++        .iter()
++        .enumerate()
++        .map(|(i, guardian)| {
++            let ed25519 = guardian
++                .ed25519
++                .as_deref()
++                .map(|key| decode32(key, &format!("guardian {i} ed25519 key")))
++                .transpose()?;
++            let mldsa65 = guardian
++                .mldsa65
++                .as_deref()
++                .map(|key| {
++                    BASE64_STANDARD
++                        .decode(key)
++                        .map_err(|e| format!("guardian {i} mldsa65 key: {e}"))
++                })
++                .transpose()?;
++            Ok(GuardianKey { ed25519, mldsa65 })
++        })
++        .collect::<Result<Vec<_>, String>>()?;
++    let guardian_set = GuardianSet {
++        scheme,
++        threshold: file.guardian_threshold,
++        bump: 0,
++        epoch: 1,
++        created_slot: 0,
++        deployment_id,
++        keys,
++    };
++    let bootstrap_deposits = file
++        .bootstrap_deposits
++        .iter()
++        .map(|deposit| {
++            Ok(BootstrapDeposit {
++                sequence: deposit.sequence,
++                source_amount: deposit.source_amount,
++                recipient: decode32(&deposit.recipient, "bootstrap recipient")?,
++            })
++        })
++        .collect::<Result<Vec<_>, String>>()?;
++    Ok(GenesisBridgeConfig {
++        network: network.code(),
++        deployment_id,
++        solana_genesis_hash: decode32(&file.solana_genesis_hash, "solana_genesis_hash")?,
++        source_program_id: decode32(&file.source_program_id, "source_program_id")?,
++        source_mint: decode32(&file.source_mint, "source_mint")?,
++        source_decimals: file.source_decimals,
++        guardian_set,
++        pauser: file
++            .pauser
++            .as_deref()
++            .map(|key| decode32(key, "pauser"))
++            .transpose()?
++            .unwrap_or([0; 32]),
++        max_mint_per_epoch: file.max_mint_per_epoch_lamports,
++        bootstrap_deposits,
++    })
++}
++
++/// Checks made before any account is added.
++pub fn check_network_policy(
++    network: LatticeNetwork,
++    cluster_type: ClusterType,
++    faucet_requested: bool,
++    inflation: &Inflation,
++) -> Result<(), String> {
++    if cluster_type != ClusterType::Development {
++        return Err(
++            "--lattice-network requires --cluster-type development (other cluster types add \
++             Solana's genesis stake allocations and clone Solana feature sets)"
++                .to_string(),
++        );
++    }
++    if network == LatticeNetwork::Mainnet {
++        if faucet_requested {
++            return Err("Lattice mainnet genesis must not have a faucet".to_string());
++        }
++        if inflation.initial != 0.0 || inflation.terminal != 0.0 || inflation.foundation != 0.0 {
++            return Err(
++                "Lattice mainnet genesis requires --inflation none (inflation would issue \
++                 unbacked LAT)"
++                    .to_string(),
++            );
++        }
++    }
++    Ok(())
++}
++
++/// Adds the bridge accounts. Must run after every other genesis account has
++/// been added.
++pub fn add_lattice_bridge_accounts(
++    genesis_config: &mut GenesisConfig,
++    network: LatticeNetwork,
++    file: &LatticeBridgeConfigFile,
++    runtime_reserve_lamports: u64,
++) -> Result<LatticeGenesisReport, String> {
++    if !genesis_config
++        .accounts
++        .contains_key(&agave_feature_set::enable_lattice_bridge_program::id())
++    {
++        return Err("enable_lattice_bridge_program must be active at genesis".to_string());
++    }
++    let config = to_bridge_config(file, network)?;
++    let program_id = solana_lattice_bridge_program::id();
++    let other_lamports = genesis_config
++        .accounts
++        .values()
++        .try_fold(0u64, |sum, account| sum.checked_add(account.lamports))
++        .ok_or("genesis lamports overflow")?;
++    let rent = genesis_config.rent.clone();
++    let (accounts, supply) = build_genesis_accounts(
++        &config,
++        &program_id,
++        other_lamports,
++        runtime_reserve_lamports,
++        |len| rent.minimum_balance(len),
++    )?;
++
++    let required = supply
++        .genesis_account_lamports
++        .checked_add(runtime_reserve_lamports)
++        .ok_or("genesis lamports overflow")?;
++    let surplus = supply.backed_native.saturating_sub(required);
++    if surplus > 0 {
++        let recipient = file.bootstrap_surplus_recipient.as_deref().ok_or_else(|| {
++            format!(
++                "bootstrap deposits exceed genesis supply by {surplus} lamports; set \
++                 bootstrap_surplus_recipient so genesis supply matches the backing"
++            )
++        })?;
++        let recipient =
++            Pubkey::from_str(recipient).map_err(|e| format!("bootstrap_surplus_recipient: {e}"))?;
++        let account = genesis_config
++            .accounts
++            .entry(recipient)
++            .or_insert_with(|| Account::new(0, 0, &system_program::id()));
++        if account.owner != system_program::id() {
++            return Err("bootstrap_surplus_recipient must be a system account".to_string());
++        }
++        account.lamports = account
++            .lamports
++            .checked_add(surplus)
++            .ok_or("surplus overflow")?;
++    }
++
++    for account in accounts {
++        if genesis_config.accounts.contains_key(&account.address) {
++            return Err(format!(
++                "bridge account {} already in genesis",
++                account.address
++            ));
++        }
++        genesis_config.add_account(
++            account.address,
++            AccountSharedData::from(Account {
++                lamports: account.lamports,
++                data: account.data,
++                owner: program_id,
++                executable: false,
++                rent_epoch: 0,
++            }),
++        );
++    }
++    let total_genesis_lamports = genesis_config
++        .accounts
++        .values()
++        .try_fold(0u64, |sum, account| sum.checked_add(account.lamports))
++        .ok_or("genesis lamports overflow")?;
++    Ok(LatticeGenesisReport {
++        network,
++        deployment_id: config.deployment_id,
++        state_address: state::state_address(&program_id, &config.deployment_id).0,
++        supply,
++        surplus_credited: surplus,
++        total_genesis_lamports,
++    })
++}
++
++#[cfg(test)]
++mod tests {
++    use {
++        super::*, solana_lattice_bridge_program::state::BridgeState,
++        solana_runtime::genesis_utils::activate_all_features,
++    };
++
++    fn unique() -> Pubkey {
++        static NEXT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
++        Pubkey::new_from_array([NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed); 32])
++    }
++
++    fn config_yaml(operator: &Pubkey, bootstrap: &str) -> String {
++        let (g0, g1, g2) = (unique(), unique(), unique());
++        format!(
++            r#"
++deployment_label: "lattice-test-1"
++solana_genesis_hash: "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
++source_program_id: "11111111111111111111111111111112"
++source_mint: "So11111111111111111111111111111111111111112"
++source_decimals: 6
++guardian_scheme: ed25519
++guardian_threshold: 2
++guardians:
++  - ed25519: "{g0}"
++  - ed25519: "{g1}"
++  - ed25519: "{g2}"
++max_mint_per_epoch_lamports: 1000000000000
++bootstrap_surplus_recipient: "{operator}"
++{bootstrap}
++"#
++        )
++    }
++
++    fn genesis_with(lamports: u64) -> GenesisConfig {
++        let mut genesis_config = GenesisConfig {
++            cluster_type: ClusterType::Development,
++            ..GenesisConfig::default()
++        };
++        activate_all_features(&mut genesis_config);
++        genesis_config.add_account(
++            unique(),
++            AccountSharedData::new(lamports, 0, &system_program::id()),
++        );
++        genesis_config
++    }
++
++    fn genesis_lamports(genesis_config: &GenesisConfig) -> u64 {
++        genesis_config.accounts.values().map(|a| a.lamports).sum()
++    }
++
++    #[test]
++    fn mainnet_policy() {
++        let disabled = Inflation::new_disabled();
++        assert!(
++            check_network_policy(
++                LatticeNetwork::Mainnet,
++                ClusterType::Development,
++                false,
++                &disabled
++            )
++            .is_ok()
++        );
++        assert!(
++            check_network_policy(
++                LatticeNetwork::Mainnet,
++                ClusterType::Development,
++                true,
++                &disabled
++            )
++            .is_err()
++        );
++        assert!(
++            check_network_policy(
++                LatticeNetwork::Mainnet,
++                ClusterType::Development,
++                false,
++                &Inflation::full()
++            )
++            .is_err()
++        );
++        assert!(
++            check_network_policy(
++                LatticeNetwork::Mainnet,
++                ClusterType::MainnetBeta,
++                false,
++                &disabled
++            )
++            .is_err()
++        );
++        assert!(
++            check_network_policy(
++                LatticeNetwork::Testnet,
++                ClusterType::Development,
++                true,
++                &Inflation::full()
++            )
++            .is_ok()
++        );
++    }
++
++    #[test]
++    fn mainnet_genesis_is_fully_backed() {
++        let operator = unique();
++        let file: LatticeBridgeConfigFile =
++            serde_yaml::from_str(&config_yaml(&operator, "")).unwrap();
++        let mut genesis_config = genesis_with(10_000_000_000);
++        assert!(
++            add_lattice_bridge_accounts(&mut genesis_config, LatticeNetwork::Mainnet, &file, 0)
++                .unwrap_err()
++                .contains("unbacked")
++        );
++
++        // 20,000 source tokens (6 decimals) = 20,000 LAT backing.
++        let file: LatticeBridgeConfigFile = serde_yaml::from_str(&config_yaml(
++            &operator,
++            &format!(
++                "bootstrap_deposits:\n  - {{ sequence: 0, source_amount: 20000000000, recipient: \
++                 \"{operator}\" }}"
++            ),
++        ))
++        .unwrap();
++        let mut genesis_config = genesis_with(10_000_000_000);
++        let reserve = 2_000_000_000;
++        let report = add_lattice_bridge_accounts(
++            &mut genesis_config,
++            LatticeNetwork::Mainnet,
++            &file,
++            reserve,
++        )
++        .unwrap();
++        assert_eq!(report.supply.unbacked_native, 0);
++        assert_eq!(report.supply.backed_native, 20_000_000_000_000);
++        assert_eq!(
++            genesis_lamports(&genesis_config) + reserve,
++            report.supply.backed_native
++        );
++        let state_account = &genesis_config.accounts[&report.state_address];
++        assert_eq!(state_account.owner, solana_lattice_bridge_program::id());
++        let bridge_state = BridgeState::decode(&state_account.data).unwrap();
++        assert_eq!(bridge_state.total_minted_native, 20_000_000_000_000);
++        assert_eq!(bridge_state.genesis_unbacked_native, 0);
++    }
++
++    #[test]
++    fn testnet_genesis_labels_unbacked_faucet() {
++        let file: LatticeBridgeConfigFile =
++            serde_yaml::from_str(&config_yaml(&unique(), "")).unwrap();
++        let mut genesis_config = genesis_with(500_000_000_000_000_000);
++        let report =
++            add_lattice_bridge_accounts(&mut genesis_config, LatticeNetwork::Testnet, &file, 1_000)
++                .unwrap();
++        assert_eq!(
++            report.supply.unbacked_native,
++            genesis_lamports(&genesis_config) + 1_000
++        );
++        let bridge_state =
++            BridgeState::decode(&genesis_config.accounts[&report.state_address].data).unwrap();
++        assert_eq!(bridge_state.network, NETWORK_TESTNET);
++        assert_eq!(
++            bridge_state.genesis_unbacked_native,
++            report.supply.unbacked_native
++        );
++    }
++
++    #[test]
++    fn bridge_feature_must_be_active() {
++        let file: LatticeBridgeConfigFile =
++            serde_yaml::from_str(&config_yaml(&unique(), "")).unwrap();
++        let mut genesis_config = GenesisConfig::default();
++        assert!(
++            add_lattice_bridge_accounts(&mut genesis_config, LatticeNetwork::Testnet, &file, 0)
++                .unwrap_err()
++                .contains("enable_lattice_bridge_program")
++        );
++    }
++}
+diff --git a/genesis/src/lib.rs b/genesis/src/lib.rs
+index 3a8572582..57b09bdd2 100644
+--- a/genesis/src/lib.rs
++++ b/genesis/src/lib.rs
+@@ -2,6 +2,7 @@
+ #![allow(clippy::arithmetic_side_effects)]
+ pub mod address_generator;
+ pub mod genesis_accounts;
++pub mod lattice;
+ pub mod stakes;
+ pub mod unlocks;
+ 
+diff --git a/genesis/src/main.rs b/genesis/src/main.rs
+index 93d314070..7d7394299 100644
+--- a/genesis/src/main.rs
++++ b/genesis/src/main.rs
+@@ -28,6 +28,7 @@ use {
+     solana_genesis::{
+         Base64Account, StakedValidatorAccountInfo, ValidatorAccountsFile,
+         genesis_accounts::add_genesis_stake_accounts,
++        lattice::{self, LatticeNetwork},
+     },
+     solana_genesis_config::GenesisConfig,
+     solana_genesis_utils::MAX_GENESIS_ARCHIVE_UNPACKED_SIZE,
+@@ -673,8 +674,44 @@ fn main() -> Result<(), Box<dyn error::Error>> {
+                 .long("alpenglow")
+                 .help("Whether we use Alpenglow consensus."),
+         )
++        .arg(
++            Arg::with_name("lattice_network")
++                .long("lattice-network")
++                .possible_values(&LatticeNetwork::STRINGS)
++                .takes_value(true)
++                .requires("lattice_bridge_config")
++                .help(
++                    "Lattice fork: build a Lattice genesis with the lattice-bridge accounts. \
++                     mainnet: no faucet, no inflation, every lamport backed by bootstrap \
++                     deposits. testnet: faucet allowed, unbacked lamports recorded in the bridge \
++                     state. Requires --cluster-type development",
++                ),
++        )
++        .arg(
++            Arg::with_name("lattice_bridge_config")
++                .long("lattice-bridge-config")
++                .value_name("FILENAME")
++                .takes_value(true)
++                .requires("lattice_network")
++                .help("Lattice bridge genesis configuration (YAML or JSON)"),
++        )
++        .arg(
++            Arg::with_name("lattice_runtime_reserve_lamports")
++                .long("lattice-runtime-reserve-lamports")
++                .value_name("LAMPORTS")
++                .takes_value(true)
++                .default_value("2000000000")
++                .help(
++                    "Lamports the runtime itself creates at slot 0 (sysvar and builtin program \
++                     account balances), which must also be backed on mainnet",
++                ),
++        )
+         .get_matches();
+ 
++    let lattice_network = matches
++        .value_of("lattice_network")
++        .map(|network| network.parse::<LatticeNetwork>().unwrap());
++
+     let ledger_path = PathBuf::from(matches.value_of("ledger_path").unwrap());
+ 
+     if matches.is_present("lamports_per_byte_year") {
+@@ -730,7 +767,11 @@ fn main() -> Result<(), Box<dyn error::Error>> {
+ 
+     let bootstrap_stake_authorized_pubkey =
+         pubkey_of(&matches, "bootstrap_stake_authorized_pubkey");
+-    let faucet_pubkey = pubkey_of(&matches, "faucet_pubkey");
++    let faucet_pubkey = if lattice_network.is_some() && !matches.is_present("faucet_lamports") {
++        None
++    } else {
++        pubkey_of(&matches, "faucet_pubkey")
++    };
+ 
+     let ticks_per_slot = value_t_or_exit!(matches, "ticks_per_slot", u64);
+ 
+@@ -751,6 +792,36 @@ fn main() -> Result<(), Box<dyn error::Error>> {
+ 
+     let cluster_type = cluster_type_of(&matches, "cluster_type").unwrap();
+ 
++    let lattice_bridge_config = lattice_network.map(|network| {
++        let requested_inflation = match matches.value_of("inflation") {
++            Some("full") => Inflation::full(),
++            Some("pico") => Inflation::pico(),
++            _ => Inflation::new_disabled(),
++        };
++        let bridge_feature = agave_feature_set::enable_lattice_bridge_program::id();
++        lattice::check_network_policy(
++            network,
++            cluster_type,
++            matches.is_present("faucet_lamports"),
++            &requested_inflation,
++        )
++        .and_then(|()| {
++            if pubkeys_of(&matches, "deactivate_feature")
++                .unwrap_or_default()
++                .contains(&bridge_feature)
++            {
++                Err("--lattice-network cannot deactivate enable_lattice_bridge_program".to_string())
++            } else {
++                Ok(())
++            }
++        })
++        .and_then(|()| lattice::load_config(matches.value_of("lattice_bridge_config").unwrap()))
++        .unwrap_or_else(|err| {
++            eprintln!("Error: {err}");
++            process::exit(1);
++        })
++    });
++
+     // Get the features to deactivate if provided
+     let features_to_deactivate = features_to_deactivate_for_cluster(&cluster_type, &matches)
+         .unwrap_or_else(|e| {
+@@ -811,6 +882,8 @@ fn main() -> Result<(), Box<dyn error::Error>> {
+             _ => unreachable!(),
+         };
+         genesis_config.inflation = inflation;
++    } else if lattice_network.is_some() {
++        genesis_config.inflation = Inflation::new_disabled();
+     }
+ 
+     let commission = value_t_or_exit!(matches, "vote_commission_percentage", u8);
+@@ -979,6 +1052,19 @@ fn main() -> Result<(), Box<dyn error::Error>> {
+         }
+     }
+ 
++    // Must come last: the supply check covers every other genesis account.
++    let lattice_report =
++        lattice_network
++            .zip(lattice_bridge_config.as_ref())
++            .map(|(network, config)| {
++                let reserve = value_t_or_exit!(matches, "lattice_runtime_reserve_lamports", u64);
++                lattice::add_lattice_bridge_accounts(&mut genesis_config, network, config, reserve)
++                    .unwrap_or_else(|err| {
++                        eprintln!("Error: {err}");
++                        process::exit(1);
++                    })
++            });
++
+     agave_logger::setup();
+     create_new_ledger(
+         &ledger_path,
+@@ -988,6 +1074,9 @@ fn main() -> Result<(), Box<dyn error::Error>> {
+     )?;
+ 
+     println!("{genesis_config}");
++    if let Some(report) = lattice_report {
++        println!("{report}");
++    }
+     Ok(())
+ }
+ 
+-- 
+2.51.0
+

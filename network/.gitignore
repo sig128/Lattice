@@ -1,0 +1,14 @@
+node_modules/
+.next/
+dist/
+coverage/
+.env
+.env.local
+*.log
+*.sqlite
+ledger/
+test-ledger/
+keys/
+target/
+.DS_Store
+chain/agave/

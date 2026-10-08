@@ -1,0 +1,8 @@
+# Lattice operational jobs. Output goes to the journal via logger inside the
+# scripts (tags lattice-disk, lattice-health, lattice-backup, lattice-alert).
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+*/5 * * * * root /usr/local/sbin/lattice-disk-alarm 2>&1 | logger -t lattice-disk
+2-59/5 * * * * root /usr/local/sbin/lattice-healthcheck 2>&1 | logger -t lattice-health
+17 3 * * * root /usr/local/sbin/lattice-backup 2>&1 | logger -t lattice-backup
