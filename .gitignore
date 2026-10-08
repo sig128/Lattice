@@ -25,3 +25,8 @@ server/service.json
 *.sln
 *.sw?
 .vercel
+
+# SSH keys
+ssh
+ssh.pub
+*.pem
