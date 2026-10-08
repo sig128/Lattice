@@ -1,3 +1,34 @@
+<p align="center">
+  <img src=".github/assets/banner.svg" alt="Lattice: Solana, built for quantum." width="100%" />
+</p>
+
+<p align="center">
+  <a href="https://github.com/anza-xyz/agave/releases/tag/v4.3.0"><img alt="Agave fork" src="https://img.shields.io/badge/Solana%20fork-Agave%20v4.3.0-9945FF?style=flat-square&logo=solana&logoColor=white" /></a>
+  <a href="https://csrc.nist.gov/pubs/fips/204/final"><img alt="ML-DSA-65" src="https://img.shields.io/badge/post--quantum-ML--DSA--65%20%C2%B7%20FIPS%20204-202020?style=flat-square" /></a>
+  <img alt="Redemption" src="https://img.shields.io/badge/LAT%20%E2%86%94%20TOKEN-1%3A1-202020?style=flat-square" />
+  <img alt="Devnet" src="https://img.shields.io/badge/devnet-live-176b3a?style=flat-square" />
+  <img alt="Testnet" src="https://img.shields.io/badge/public%20testnet-deploying-8a5a00?style=flat-square" />
+  <img alt="Bridge" src="https://img.shields.io/badge/bridge-unaudited-8a5a00?style=flat-square" />
+</p>
+
+<p align="center">
+  <img alt="Rust" src="https://img.shields.io/badge/Rust-1.97-000000?style=flat-square&logo=rust&logoColor=white" />
+  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5.9-3178C6?style=flat-square&logo=typescript&logoColor=white" />
+  <img alt="Next.js" src="https://img.shields.io/badge/Next.js-16-000000?style=flat-square&logo=nextdotjs&logoColor=white" />
+  <img alt="React" src="https://img.shields.io/badge/React-19-149ECA?style=flat-square&logo=react&logoColor=white" />
+  <img alt="Node.js" src="https://img.shields.io/badge/Node.js-22-5FA04E?style=flat-square&logo=nodedotjs&logoColor=white" />
+  <img alt="pnpm" src="https://img.shields.io/badge/pnpm-10-F69220?style=flat-square&logo=pnpm&logoColor=white" />
+  <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-16-4169E1?style=flat-square&logo=postgresql&logoColor=white" />
+  <img alt="AWS" src="https://img.shields.io/badge/AWS-EC2-FF9900?style=flat-square&logo=amazonwebservices&logoColor=white" />
+</p>
+
+<p align="center">
+  <a href="https://x.com/sig128"><img alt="Follow on X" src="https://img.shields.io/badge/follow-%40sig128-000000?style=flat-square&logo=x&logoColor=white" /></a>
+  <a href="https://github.com/PolyClawdDev/Lattice/commits/main"><img alt="Last commit" src="https://img.shields.io/github/last-commit/PolyClawdDev/Lattice?style=flat-square&color=202020" /></a>
+  <a href="https://github.com/PolyClawdDev/Lattice/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/PolyClawdDev/Lattice?style=flat-square&color=202020" /></a>
+  <img alt="Repo size" src="https://img.shields.io/github/repo-size/PolyClawdDev/Lattice?style=flat-square&color=202020" />
+</p>
+
 # Lattice
 
 **Solana, built for quantum.** Lattice is a Solana-derived network (a fork of Agave v4.3.0) that adds NIST ML-DSA post-quantum signatures, verified by the chain itself, and a native coin, LAT, designed to redeem 1:1 for its source token on Solana.
