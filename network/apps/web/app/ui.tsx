@@ -1,3 +1,4 @@
+import { NATIVE_ENVIRONMENT_LABEL } from "@lattice/config/network";
 import type { ReactNode } from "react";
 
 export function Page({
@@ -29,7 +30,7 @@ export function PageHeader({
 }) {
   return (
     <header className="page-header">
-      <div className="eyebrow">{label} <span>Local development</span></div>
+      <div className="eyebrow">{label} <span>{NATIVE_ENVIRONMENT_LABEL}</span></div>
       <h1>{title}</h1>
       <div className="lede">{children}</div>
     </header>

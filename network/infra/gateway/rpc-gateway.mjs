@@ -59,7 +59,7 @@ export function loadConfig(env = process.env) {
     webTimeoutMs: n("GATEWAY_WEB_TIMEOUT_MS", 60_000),
     faucetPerIp: { capacity: 1, perSecond: 1 / n("GATEWAY_FAUCET_IP_INTERVAL_SEC", 600) },
     faucetGlobal: { capacity: n("GATEWAY_FAUCET_GLOBAL_PER_HOUR", 30), perSecond: n("GATEWAY_FAUCET_GLOBAL_PER_HOUR", 30) / 3600 },
-    bridgePerIp: { capacity: 2, perSecond: 2 / 600 },
+    bridgePerIp: { capacity: n("GATEWAY_BRIDGE_IP_BURST", 6), perSecond: n("GATEWAY_BRIDGE_IP_BURST", 6) / 600 },
     bridgeGlobal: { capacity: 60, perSecond: 60 / 3600 },
     consolePerIp: { capacity: 10, perSecond: 2 },
     readPerIp: { capacity: 20, perSecond: 2 },

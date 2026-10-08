@@ -1,4 +1,4 @@
-import { publicConfig } from "@lattice/config";
+import { NATIVE_ENVIRONMENT_LABEL, publicConfig } from "@lattice/config";
 import { readSamples } from "@lattice/bridge/state";
 import Link from "next/link";
 import { CopyButton } from "./components";
@@ -44,7 +44,7 @@ export default async function OverviewPage() {
 
       <Section id="overview" label="Current state" title="Evidence, separated">
         <dl className="status-list">
-          <DefinitionRow term="Network"><Status state="good">Local development — slots advancing</Status></DefinitionRow>
+          <DefinitionRow term="Network"><Status state="good">{NATIVE_ENVIRONMENT_LABEL} — slots advancing</Status></DefinitionRow>
           <DefinitionRow term="RPC"><Status state="good">Operational — identity verified</Status></DefinitionRow>
           <DefinitionRow term="Development bridge"><Status state="warn">Operator-attested test assets</Status></DefinitionRow>
           <DefinitionRow term="Production bridge"><Status state="neutral">Unconfigured</Status></DefinitionRow>

@@ -1,4 +1,4 @@
-import { publicConfig } from "@lattice/config";
+import { NATIVE_ENVIRONMENT_LABEL, publicConfig } from "@lattice/config";
 import { CopyButton } from "../components";
 import { Faucet, RpcConsole } from "../live-rpc";
 import { Code, DefinitionRow, Page, PageHeader, Section, Status } from "../ui";
@@ -48,7 +48,7 @@ if (observed !== manifest.destination.genesisHash) throw new Error("Wrong networ
           <DefinitionRow term="Transaction format"><Status state="good">Standard Agave transfer verified locally</Status></DefinitionRow>
           <DefinitionRow term="Native decimals">{publicConfig.project.nativeDecimals}</DefinitionRow>
           <DefinitionRow term="Fee behavior">Unavailable until validator configuration exists</DefinitionRow>
-          <DefinitionRow term="Faucet">Operational · local development only</DefinitionRow>
+          <DefinitionRow term="Faucet">Operational · {NATIVE_ENVIRONMENT_LABEL.toLowerCase()} · unbacked test units · rate-limited</DefinitionRow>
           <DefinitionRow term="Runnable example"><code>pnpm --filter @lattice/example-native-transfer start</code></DefinitionRow>
           <DefinitionRow term="Wallet support">CLI / SDK works; browser wallet compatibility unverified</DefinitionRow>
         </dl>
@@ -56,9 +56,9 @@ if (observed !== manifest.destination.genesisHash) throw new Error("Wrong networ
 
       <Section id="programs" label="SVM programs" title="Example deployment pending">
         <p>The pinned, unmodified Agave baseline should support standard SVM programs, but an external counter app has not yet been deployed and called through this repository&apos;s RPC.</p>
-        <Code>{`# After building pinned Agave and starting the local validator:
-solana --url http://127.0.0.1:8899 genesis-hash
-solana --url http://127.0.0.1:8899 slot
+        <Code>{`# Against this network's public RPC:
+solana --url ${rpc.httpUrl} genesis-hash
+solana --url ${rpc.httpUrl} slot
 # Program build/deploy commands will be pinned with the example.`}</Code>
       </Section>
 

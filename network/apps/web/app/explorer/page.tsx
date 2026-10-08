@@ -4,14 +4,14 @@ export default function ExplorerPage() {
   return (
     <Page toc={[["Search", "#search"], ["Coverage", "#coverage"]]}>
       <PageHeader label="Explorer" title="Inspect the development ledger">
-        <p>Slots, transactions, accounts, supply, and bridge receipts will appear only when a matching local network and indexer provide real evidence.</p>
+        <p>Slots, transactions, accounts, supply, and bridge receipts will appear only when a matching network and indexer provide real evidence.</p>
       </PageHeader>
 
       <Section id="search" label="Search" title="Ledger unavailable">
         <div className="empty-state">
           <span className="empty-mark" aria-hidden="true">⌁</span>
           <h3>No matching network observation</h3>
-          <p>Start the pinned local validator and confirm its genesis before searching.</p>
+          <p>An indexer for this genesis is not running yet; use the RPC directly until it is.</p>
           <label className="search">Slot, transaction, account, or receipt<input disabled placeholder="Explorer unavailable" /></label>
         </div>
       </Section>

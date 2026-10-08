@@ -7,7 +7,7 @@
   <a href="https://csrc.nist.gov/pubs/fips/204/final"><img alt="ML-DSA-65" src="https://img.shields.io/badge/post--quantum-ML--DSA--65%20%C2%B7%20FIPS%20204-202020?style=flat-square" /></a>
   <img alt="Redemption" src="https://img.shields.io/badge/LAT%20%E2%86%94%20TOKEN-1%3A1-202020?style=flat-square" />
   <img alt="Devnet" src="https://img.shields.io/badge/devnet-live-176b3a?style=flat-square" />
-  <img alt="Testnet" src="https://img.shields.io/badge/public%20testnet-deploying-8a5a00?style=flat-square" />
+  <a href="https://18.213.75.190"><img alt="Testnet" src="https://img.shields.io/badge/public%20testnet-live-176b3a?style=flat-square" /></a>
   <img alt="Bridge" src="https://img.shields.io/badge/bridge-unaudited-8a5a00?style=flat-square" />
 </p>
 
@@ -18,7 +18,7 @@
   <img alt="React" src="https://img.shields.io/badge/React-19-149ECA?style=flat-square&logo=react&logoColor=white" />
   <img alt="Node.js" src="https://img.shields.io/badge/Node.js-22-5FA04E?style=flat-square&logo=nodedotjs&logoColor=white" />
   <img alt="pnpm" src="https://img.shields.io/badge/pnpm-10-F69220?style=flat-square&logo=pnpm&logoColor=white" />
-  <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-16-4169E1?style=flat-square&logo=postgresql&logoColor=white" />
+  <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-18-4169E1?style=flat-square&logo=postgresql&logoColor=white" />
   <img alt="AWS" src="https://img.shields.io/badge/AWS-EC2-FF9900?style=flat-square&logo=amazonwebservices&logoColor=white" />
 </p>
 
@@ -45,8 +45,23 @@ The network code lives in [`network/`](network/). The existing web app at the re
 | ML-DSA-65 verification syscall and `pq-vault` program | Implemented and tested |
 | Native LAT issuance and burn (`lattice-bridge` builtin) | Implemented and tested |
 | Solana source vault and guardian relayer | Implemented and tested |
-| Public testnet on AWS | Deploying |
+| Public testnet on AWS: website, JSON-RPC, WebSocket, rate-limited faucet | Live at [https://18.213.75.190](https://18.213.75.190) (testnet, unbacked test units) |
 | Mainnet with real tokens | After external security review, starting with a deposit cap |
+
+### Public testnet
+
+| | URL |
+| --- | --- |
+| Website | [https://18.213.75.190](https://18.213.75.190) |
+| HTTP JSON-RPC | `https://18.213.75.190/rpc` |
+| WebSocket | `wss://18.213.75.190/ws` |
+| Genesis hash | `3UEpafESpcQx1NbeSGKEYsF3sFqUiiQV9yu8pFL397QS` |
+
+```sh
+solana --url https://18.213.75.190/rpc genesis-hash
+```
+
+Single-validator testnet running the official Agave v4.3.0 release on AWS. Test units are unbacked and the testnet can be reset. The public RPC serves allowlisted methods only, with per-IP rate limits; admin methods and `requestAirdrop` are blocked (use the site faucet). The TLS certificate is a short-lived Let's Encrypt IP certificate.
 
 ## How it works
 

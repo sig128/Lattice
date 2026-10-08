@@ -8,6 +8,7 @@ import {
   type Commitment,
 } from "@solana/web3.js";
 import { getAccount, getMint } from "@solana/spl-token";
+import { INTERNAL_HTTP_RPC } from "@lattice/config";
 import { reconcile } from "@lattice/protocol";
 import {
   KEY_DIR,
@@ -15,7 +16,7 @@ import {
   type LocalBridgeState,
 } from "./state.js";
 
-export const RPC_URL = "http://127.0.0.1:8899";
+export const RPC_URL = INTERNAL_HTTP_RPC;
 export const COMMITMENT: Commitment = "finalized";
 
 export async function loadOrCreateKey(name: string): Promise<Keypair> {

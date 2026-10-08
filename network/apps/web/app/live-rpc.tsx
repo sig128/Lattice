@@ -1,10 +1,9 @@
 "use client";
 
+import { IS_TESTNET, PUBLIC_HTTP_RPC, PUBLIC_WS_RPC, TEST_ASSET_NOTICE } from "@lattice/config/network";
 import { useCallback, useEffect, useState } from "react";
 import { CopyButton } from "./components";
 
-const PUBLIC_HTTP_RPC = process.env.NEXT_PUBLIC_NATIVE_HTTP_RPC ?? "http://127.0.0.1:8899";
-const PUBLIC_WS_RPC = process.env.NEXT_PUBLIC_NATIVE_WS_RPC ?? "ws://127.0.0.1:8900";
 
 interface RpcReply {
   method: string;
@@ -64,7 +63,7 @@ export function LiveRpcVitals({ expectedGenesis }: { expectedGenesis: string }) 
 export function RpcConsole() {
   const [method, setMethod] = useState("getSlot");
   const [address, setAddress] = useState("");
-  const [output, setOutput] = useState("Select a method and run a real local request.");
+  const [output, setOutput] = useState("Select a method and run a real request against this network.");
   const [running, setRunning] = useState(false);
 
   async function run() {
@@ -98,14 +97,14 @@ export function RpcEndpoints() {
     <div className="rpc-front">
       <div><span>HTTP JSON-RPC</span><code>{PUBLIC_HTTP_RPC}</code><CopyButton value={PUBLIC_HTTP_RPC} /></div>
       <div><span>WebSocket</span><code>{PUBLIC_WS_RPC}</code><CopyButton value={PUBLIC_WS_RPC} /></div>
-      <p>Local machine only. Public developer access requires a hosted node with domain and TLS.</p>
+      <p>{IS_TESTNET ? "Public testnet RPC · allowlisted methods · per-IP rate limits · requestAirdrop via the faucet below only." : "Local machine only. Public developer access requires a hosted node."}</p>
     </div>
   );
 }
 
 export function Faucet() {
   const [address, setAddress] = useState("");
-  const [message, setMessage] = useState("Unbacked local test units only.");
+  const [message, setMessage] = useState(TEST_ASSET_NOTICE);
   const [running, setRunning] = useState(false);
 
   async function requestFunds() {
@@ -128,7 +127,7 @@ export function Faucet() {
 
   return (
     <div className="faucet">
-      <label>Recipient public key<input value={address} onChange={(event) => setAddress(event.target.value)} placeholder="Solana public key on this local genesis" /></label>
+      <label>Recipient public key<input value={address} onChange={(event) => setAddress(event.target.value)} placeholder={`Public key on this ${IS_TESTNET ? "testnet" : "local"} genesis`} /></label>
       <button type="button" className="primary" onClick={requestFunds} disabled={running || !address}>{running ? "Requesting…" : "Request 1 test LAT"}</button>
       <small>{message}</small>
     </div>

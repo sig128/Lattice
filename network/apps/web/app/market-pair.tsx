@@ -1,5 +1,6 @@
 "use client";
 
+import { NATIVE_ENVIRONMENT_LABEL } from "@lattice/config/network";
 import type { BridgeSample } from "@lattice/bridge/state";
 import { useMemo, useRef, useState } from "react";
 import { CopyButton } from "./components";
@@ -182,7 +183,7 @@ function LatticeLedgerChart({ samples, market }: { samples: BridgeSample[]; mark
 
   return (
     <article className="terminal-card lattice-terminal">
-      <header className="terminal-header"><div className="asset-heading"><span className="asset-mark lattice">LA</span><div><small>Lattice redemption ledger</small><h3>LAT / source token</h3><p>Not a LAT market price</p></div></div><div className="terminal-price"><strong>{liabilities.at(-1)?.toLocaleString() ?? "—"} LAT</strong><span>{latest?.label ?? "Collecting"}</span></div></header>
+      <header className="terminal-header"><div className="asset-heading"><span className="asset-mark lattice">LAT</span><div><small>Lattice chain · native coin</small><h3>{`LAT / ${market.configured ? market.symbol ?? "TOKEN" : "TOKEN"}`}</h3><p>{market.configured ? `Redeemable 1:1 for ${market.symbol ?? "TOKEN"} · not a market price` : "Redeemable 1:1 · awaiting token CA"}</p></div></div><div className="terminal-price"><strong>{liabilities.at(-1)?.toLocaleString() ?? "—"} LAT</strong><span>{latest?.label ?? "Collecting"}</span></div></header>
       <div className="terminal-stats"><div><span>Locked reserves</span><strong>{reserves.at(-1)?.toLocaleString() ?? "—"}</strong></div><div><span>Issued + pending</span><strong>{liabilities.at(-1)?.toLocaleString() ?? "—"}</strong></div><div><span>Coverage</span><strong>{latest?.label ?? "—"}</strong></div><div><span>Latest slot</span><strong>{latest?.slot.toLocaleString() ?? "—"}</strong></div><div><span>Mode</span><strong>Test assets</strong></div></div>
       <div className="terminal-tools ledger-tools"><div className="interval-tabs"><button className="active">Finalized observations</button></div><div className="range-tabs"><button className="active">All</button></div></div>
       <div className="ohlcv-readout"><span>R <b>{selected ? Number(BigInt(selected.reservesAtomic)) / 1e9 : "—"}</b></span><span>L <b>{selected ? Number(BigInt(selected.liabilitiesAtomic)) / 1e9 : "—"}</b></span><span>Coverage <b>{selected?.label ?? "—"}</b></span><span>Slot <b>{selected?.slot ?? "—"}</b></span></div>
@@ -203,7 +204,7 @@ function LatticeLedgerChart({ samples, market }: { samples: BridgeSample[]; mark
       ) : <EmptyTradingFrame configured error="Collecting finalized ledger observations" />}
       <div className="chart-legend"><span><i className="reserve" />Locked reserves</span><span><i className="liability" />Issued + pending</span></div>
       <table className="sr-only"><caption>Ledger backing observations</caption><thead><tr><th>Slot</th><th>Reserves</th><th>Liabilities</th><th>Coverage</th></tr></thead><tbody>{samples.map((sample) => <tr key={sample.sequence}><td>{sample.slot}</td><td>{sample.reservesAtomic}</td><td>{sample.liabilitiesAtomic}</td><td>{sample.label}</td></tr>)}</tbody></table>
-      <footer><span>Local development · test assets · not real backing</span><span>Target redemption ratio 1:1 · production bridge inactive</span></footer>
+      <footer><span>{NATIVE_ENVIRONMENT_LABEL} · test assets · not real backing</span><span>Target redemption ratio 1:1 · production bridge inactive</span></footer>
     </article>
   );
 }

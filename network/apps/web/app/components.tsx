@@ -1,5 +1,6 @@
 "use client";
 
+import { PUBLIC_HTTP_RPC } from "@lattice/config/network";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
@@ -123,7 +124,7 @@ export function CommandPalette() {
   }, [open]);
 
   async function copyRpc() {
-    await navigator.clipboard.writeText(process.env.NEXT_PUBLIC_NATIVE_HTTP_RPC ?? "http://127.0.0.1:8899");
+    await navigator.clipboard.writeText(PUBLIC_HTTP_RPC);
     setOpen(false);
   }
 
@@ -139,7 +140,7 @@ export function CommandPalette() {
           <div ref={dialog} className="command-palette" role="dialog" aria-modal="true" aria-label="Command palette">
             <div className="palette-heading"><span>Technical index</span><button type="button" onClick={() => setOpen(false)}>Esc</button></div>
             {indexLinks.map((item) => <Link key={item.href} href={item.href} onClick={() => setOpen(false)}><b>{item.number}</b><span>{item.label}</span><small>{item.stateLabel}</small></Link>)}
-            <button className="palette-action" type="button" onClick={copyRpc}><b>↗</b><span>Copy HTTP RPC</span><small>{process.env.NEXT_PUBLIC_NATIVE_HTTP_RPC ?? "127.0.0.1"}</small></button>
+            <button className="palette-action" type="button" onClick={copyRpc}><b>↗</b><span>Copy HTTP RPC</span><small>{PUBLIC_HTTP_RPC}</small></button>
           </div>
         </div>
       ) : null}

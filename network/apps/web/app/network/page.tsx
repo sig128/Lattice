@@ -1,4 +1,4 @@
-import { publicConfig } from "@lattice/config";
+import { INTERNAL_HTTP_RPC, INTERNAL_WS_RPC, IS_TESTNET, NATIVE_ENVIRONMENT_LABEL, NATIVE_GENESIS_HASH, PUBLIC_HTTP_RPC, PUBLIC_WS_RPC, publicConfig } from "@lattice/config";
 import { probeEndpoint } from "@lattice/monitor/probe";
 import { CopyButton } from "../components";
 import { DefinitionRow, Page, PageHeader, Section, Status } from "../ui";
@@ -9,9 +9,10 @@ export const dynamic = "force-dynamic";
 export default async function NetworkPage() {
   const observations = await Promise.all(publicConfig.rpc.map(async (endpoint) => ({
     endpoint,
+    // Same-host validator; the public URL is displayed, not dialled back through the edge.
     observation: await probeEndpoint(
-      endpoint.httpUrl,
-      endpoint.websocketUrl,
+      INTERNAL_HTTP_RPC,
+      INTERNAL_WS_RPC,
       endpoint.expectedGenesisHash,
       2_500,
     ),
@@ -24,17 +25,17 @@ export default async function NetworkPage() {
         <p>Configured RPC endpoints are probed server-side with bounded timeouts. A response is healthy only when identity and freshness checks succeed.</p>
       </PageHeader>
 
-      <Section id="network" label="Development network" title="Independent genesis pending">
+      <Section id="network" label={`${NATIVE_ENVIRONMENT_LABEL} network`} title={IS_TESTNET ? "Independent testnet genesis" : "Independent genesis pending"}>
         <dl className="facts">
           <DefinitionRow term="Network">{anyOperational ? <Status state="good">Observed</Status> : <Status state="bad">Unavailable — no healthy validator</Status>}</DefinitionRow>
-          <DefinitionRow term="Topology">Planned single-validator development node</DefinitionRow>
-          <DefinitionRow term="Expected genesis">Not configured</DefinitionRow>
-          <DefinitionRow term="Public RPC">Unavailable</DefinitionRow>
+          <DefinitionRow term="Topology">{IS_TESTNET ? "Single-validator public testnet node · resettable · unbacked test units" : "Single-validator local development node"}</DefinitionRow>
+          <DefinitionRow term="Expected genesis">{NATIVE_GENESIS_HASH ? <code>{NATIVE_GENESIS_HASH}</code> : "Not configured"}</DefinitionRow>
+          <DefinitionRow term="Public RPC">{IS_TESTNET ? <code>{PUBLIC_HTTP_RPC}</code> : "Unavailable · local machine only"}</DefinitionRow>
           <DefinitionRow term="Availability history">Collecting after first persisted observation</DefinitionRow>
         </dl>
       </Section>
 
-      <Section id="rpc" label="RPC endpoints" title="Configured local access">
+      <Section id="rpc" label="RPC endpoints" title={IS_TESTNET ? "Configured public access" : "Configured local access"}>
         <div className="table-wrap">
           <table>
             <thead><tr><th>Endpoint</th><th>URL</th><th>Status</th><th>Genesis</th><th>Slot</th><th>Latency</th><th>Checked</th></tr></thead>
@@ -76,9 +77,15 @@ export default async function NetworkPage() {
         <p className="caption">Page probe timeout: 2.5 seconds. Worker defaults: every 15 seconds, 5-second timeout, stale after 60 seconds.</p>
       </Section>
 
-      <Section id="public" label="Public access" title="No public endpoint deployed">
-        <p>A public RPC requires a real host, TLS, persistent node infrastructure, method controls, body limits, abuse controls, and WebSocket limits. No fictional domain is shown.</p>
-      </Section>
+      {IS_TESTNET ? (
+        <Section id="public" label="Public access" title="Public testnet endpoint">
+          <p>HTTP JSON-RPC <code>{PUBLIC_HTTP_RPC}</code> and WebSocket <code>{PUBLIC_WS_RPC}</code> run on a single host behind an edge gateway: allowlisted methods only, request body and batch limits, per-IP and global rate limits, WebSocket connection caps, and no public <code>requestAirdrop</code> (use the site faucet). The testnet can be reset; its units are unbacked.</p>
+        </Section>
+      ) : (
+        <Section id="public" label="Public access" title="No public endpoint deployed">
+          <p>A public RPC requires a real host, TLS, persistent node infrastructure, method controls, body limits, abuse controls, and WebSocket limits. No fictional domain is shown.</p>
+        </Section>
+      )}
     </Page>
   );
 }

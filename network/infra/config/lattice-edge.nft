@@ -39,6 +39,9 @@ table inet lattice_edge {
 	chain input {
 		type filter hook input priority filter - 10; policy accept;
 		iif "lo" accept
+		# Agave 4.3.0 test-validator hardcodes RPC, PubSub and faucet listeners
+		# to 0.0.0.0; they must only ever be reached over loopback.
+		tcp dport { 8899, 8900, 9900 } counter drop
 		# At most 128 concurrent TCP connections per source address.
 		tcp dport { 80, 443 } ct state new add @http_conn4 { ip saddr ct count over 128 } counter reject with tcp reset
 		tcp dport { 80, 443 } ct state new add @http_conn6 { ip6 saddr ct count over 128 } counter reject with tcp reset

@@ -1,3 +1,4 @@
+import { INTERNAL_HTTP_RPC, TEST_ASSET_NOTICE } from "@lattice/config";
 import { readSamples, readState } from "@lattice/bridge/state";
 import { getAccount, getMint } from "@solana/spl-token";
 import { Connection, PublicKey } from "@solana/web3.js";
@@ -7,8 +8,8 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   const state = await readState();
-  if (!state) return Response.json({ error: "Local bridge is not initialized" }, { status: 503 });
-  const connection = new Connection("http://127.0.0.1:8899", "finalized");
+  if (!state) return Response.json({ error: "Test bridge is not initialized on this network" }, { status: 503 });
+  const connection = new Connection(INTERNAL_HTTP_RPC, "finalized");
   const [vault, issued, slot, samples] = await Promise.all([
     getAccount(connection, new PublicKey(state.vaultAccount), "finalized"),
     getMint(connection, new PublicKey(state.issuedMint), "finalized"),
@@ -37,6 +38,6 @@ export async function GET() {
     liabilitiesAtomic: accounting.liabilities.toString(),
     coverage: accounting.label,
     sampleCount: samples.length,
-    warning: "DEV ONLY · unbacked test assets · never use for real funds",
+    warning: TEST_ASSET_NOTICE,
   }, { headers: { "Cache-Control": "no-store" } });
 }

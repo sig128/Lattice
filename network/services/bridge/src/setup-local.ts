@@ -6,7 +6,7 @@ import {
   mintToChecked,
   transferChecked,
 } from "@solana/spl-token";
-import { NATIVE_GENESIS_HASH } from "@lattice/config";
+import { IS_TESTNET, NATIVE_GENESIS_HASH } from "@lattice/config";
 import { COMMITMENT, RPC_URL, ensureFunding, loadOrCreateKey, observe } from "./local.js";
 import {
   SAMPLES_PATH,
@@ -18,7 +18,7 @@ import {
 
 const connection = new Connection(RPC_URL, COMMITMENT);
 const observedGenesis = await connection.getGenesisHash();
-if (observedGenesis !== NATIVE_GENESIS_HASH) {
+if (!NATIVE_GENESIS_HASH || observedGenesis !== NATIVE_GENESIS_HASH) {
   throw new Error(`Wrong genesis: expected ${NATIVE_GENESIS_HASH}, observed ${observedGenesis}`);
 }
 
@@ -49,7 +49,7 @@ setupTransactions.push(await mintToChecked(
 const state: LocalBridgeState = {
   schemaVersion: 1,
   genesisHash: observedGenesis,
-  deploymentId: "lattice-local-bridge-v1",
+  deploymentId: IS_TESTNET ? "lattice-testnet-bridge-v1" : "lattice-local-bridge-v1",
   sourceMint: sourceMint.toBase58(),
   issuedMint: issuedMint.toBase58(),
   sourceOwnerAccount: sourceOwner.address.toBase58(),

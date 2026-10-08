@@ -3,8 +3,8 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
-export const DATA_DIR = resolve(ROOT, "services/bridge/data");
-export const KEY_DIR = resolve(ROOT, "keys");
+export const DATA_DIR = process.env.LATTICE_BRIDGE_DATA_DIR || resolve(ROOT, "services/bridge/data");
+export const KEY_DIR = process.env.LATTICE_BRIDGE_KEY_DIR || resolve(ROOT, "keys");
 export const STATE_PATH = resolve(DATA_DIR, "local-state.json");
 export const SAMPLES_PATH = resolve(DATA_DIR, "samples.json");
 export const RECEIPTS_PATH = resolve(DATA_DIR, "receipts.json");

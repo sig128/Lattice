@@ -1,5 +1,6 @@
 "use client";
 
+import { NATIVE_ENVIRONMENT_LABEL, PUBLIC_HTTP_RPC, PUBLIC_WS_RPC, TEST_ASSET_NOTICE } from "@lattice/config/network";
 import {
   burnChecked,
   getAccount,
@@ -32,8 +33,13 @@ interface Receipt {
   status: "completed";
 }
 
-const RPC = process.env.NEXT_PUBLIC_NATIVE_HTTP_RPC ?? "http://127.0.0.1:8899";
 const WALLET_KEY = "lattice.localBridge.devWallet";
+
+// The public RPC path (/rpc) does not accept WebSocket upgrades; subscriptions
+// used for confirmations go to the separate public WebSocket endpoint.
+function rpcConnection() {
+  return new Connection(PUBLIC_HTTP_RPC, { commitment: "confirmed", wsEndpoint: PUBLIC_WS_RPC });
+}
 const progressStates = ["Awaiting signature", "Submitted", "Awaiting finality", "Processing", "Completed", "Delayed", "Failed"] as const;
 
 function walletFromStorage() {
@@ -64,14 +70,14 @@ export function LocalBridge() {
   const [progress, setProgress] = useState<(typeof progressStates)[number]>("Awaiting signature");
   const [receipt, setReceipt] = useState<Receipt | null>(null);
   const [lookup, setLookup] = useState("");
-  const [message, setMessage] = useState("Ready for a local test transaction.");
+  const [message, setMessage] = useState("Ready for a test transaction.");
 
   const refresh = useCallback(async (owner: Keypair) => {
     const response = await fetch("/api/bridge/state", { cache: "no-store" });
     const nextState = await response.json() as BridgeState;
     if (!response.ok) throw new Error((nextState as unknown as { error?: string }).error ?? "Bridge state unavailable");
     setState(nextState);
-    const connection = new Connection(RPC, "confirmed");
+    const connection = rpcConnection();
     const sourceAddress = await getAssociatedTokenAddress(new PublicKey(nextState.sourceMint), owner.publicKey);
     const issuedAddress = await getAssociatedTokenAddress(new PublicKey(nextState.issuedMint), owner.publicKey);
     const [sol, source, issued] = await Promise.all([
@@ -100,20 +106,20 @@ export function LocalBridge() {
 
   async function faucet() {
     if (!wallet) return;
-    setMessage("Requesting local SOL…");
+    setMessage("Requesting test LAT…");
     const response = await fetch("/api/faucet", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ address: wallet.publicKey.toBase58() }),
     });
     const result = await response.json() as { error?: string; signature?: string };
     if (!response.ok) return setMessage(result.error ?? "Faucet failed");
-    setMessage(`Local SOL confirmed · ${result.signature?.slice(0, 12)}…`);
+    setMessage(`Test LAT confirmed · ${result.signature?.slice(0, 12)}…`);
     await refresh(wallet);
   }
 
   async function testTokens() {
     if (!wallet) return;
-    setMessage("Minting local source test tokens…");
+    setMessage("Minting source test tokens…");
     const response = await fetch("/api/bridge/test-mint", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ owner: wallet.publicKey.toBase58() }),
@@ -130,11 +136,11 @@ export function LocalBridge() {
     setProgress("Awaiting signature");
     try {
       const amountAtomic = parseUiAmount(amount, state.decimals);
-      if (amountAtomic > available) throw new Error("Amount exceeds local test balance");
-      const connection = new Connection(RPC, "confirmed");
+      if (amountAtomic > available) throw new Error("Amount exceeds test balance");
+      const connection = rpcConnection();
       const mint = new PublicKey(direction === "deposit" ? state.sourceMint : state.issuedMint);
       const ownerAccount = await getAssociatedTokenAddress(mint, wallet.publicKey);
-      setMessage("Authorize the local transaction with the browser-generated development key.");
+      setMessage("Authorize the test transaction with the browser-generated test key.");
       const sourceSignature = direction === "deposit"
         ? await transferChecked(connection, wallet, ownerAccount, mint, new PublicKey(state.vaultAccount), wallet, amountAtomic, state.decimals)
         : await burnChecked(connection, wallet, ownerAccount, mint, wallet, amountAtomic, state.decimals);
@@ -176,9 +182,9 @@ export function LocalBridge() {
   return (
     <div className="bridge-workspace">
       <div className="premium-bridge">
-        <div className="bridge-mode"><span>Local development wallet</span><strong>DEV ONLY · unbacked test assets · never use for real funds</strong></div>
+        <div className="bridge-mode"><span>{NATIVE_ENVIRONMENT_LABEL} test wallet</span><strong>{TEST_ASSET_NOTICE}</strong></div>
         <div className="wallet-row"><div><small>Browser-generated public key</small><code>{wallet?.publicKey.toBase58() ?? "Creating…"}</code></div>{wallet ? <CopyButton value={wallet.publicKey.toBase58()} /> : null}</div>
-        <div className="wallet-actions"><button type="button" onClick={faucet}>Get local SOL</button><button type="button" onClick={testTokens}>Get 100 source test units</button><span>{(solBalance / 1e9).toFixed(3)} local SOL</span></div>
+        <div className="wallet-actions"><button type="button" onClick={faucet}>Get test LAT</button><button type="button" onClick={testTokens}>Get 100 source test units</button><span>{(solBalance / 1e9).toFixed(3)} test LAT</span></div>
 
         <div className={`network-route ${direction}`}>
           <div className="network-panel"><span className="chain-mark">S</span><div><small>{direction === "deposit" ? "From" : "To"}</small><strong>Solana test source</strong><em>{units(sourceBalance, state?.decimals ?? 9)} available</em></div></div>
@@ -195,11 +201,11 @@ export function LocalBridge() {
 
         <dl className="bridge-breakdown">
           <div><dt>Conversion</dt><dd>1 : 1 exact units</dd></div>
-          <div><dt>Bridge fee</dt><dd>0 · local development</dd></div>
+          <div><dt>Bridge fee</dt><dd>0 · test bridge</dd></div>
           <div><dt>Precision</dt><dd>{state?.decimals ?? 9} decimals</dd></div>
           <div><dt>Residual dust</dt><dd>{preview?.residualSourceAtomic.toString() ?? "0"} atomic units</dd></div>
         </dl>
-        <div className="source-ca"><span>Local source CA</span><code>{state?.sourceMint ?? "Loading…"}</code>{state ? <CopyButton value={state.sourceMint} /> : null}</div>
+        <div className="source-ca"><span>Test source CA</span><code>{state?.sourceMint ?? "Loading…"}</code>{state ? <CopyButton value={state.sourceMint} /> : null}</div>
         <div className="route-visual"><span>Vault lock</span><i>→</i><span>Finality</span><i>→</i><span>Attestation</span><i>→</i><span>Issue</span></div>
         <button className="bridge-submit" type="button" onClick={bridge} disabled={!preview || !wallet || !state}>{direction === "deposit" ? "Deposit and issue" : "Burn and redeem"}</button>
         <p className="bridge-message" aria-live="polite">{message}</p>

@@ -524,7 +524,9 @@ configure_edge() {
 VALIDATOR_CHANGED=0
 log "Lattice bootstrap ${RUN_ID} from ${UPLOAD} (log ${BOOT_LOG})"
 if (( skip_os )); then
-  command -v jq >/dev/null || die "--skip-os requires a previously bootstrapped host"
+  for tool in jq /usr/local/bin/node /usr/local/bin/pnpm caddy psql; do
+    command -v "${tool}" >/dev/null || die "--skip-os requires a fully bootstrapped host (missing ${tool})"
+  done
 else
   setup_os
 fi

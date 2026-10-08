@@ -67,6 +67,7 @@ RSYNC_FILTER=(
   --exclude=/chain/evidence/lattice-build-*/
   --exclude=.env
   --exclude=.env.*
+  --include=/infra/env/internal.env
   --exclude=/infra/env/*.env
   --exclude=*keypair*.json
   --exclude=/*.pem

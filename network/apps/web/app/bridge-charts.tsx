@@ -1,3 +1,4 @@
+import { NATIVE_ENVIRONMENT_LABEL } from "@lattice/config/network";
 import type { BridgeSample } from "@lattice/bridge/state";
 
 function chartPoints(values: number[]) {
@@ -51,7 +52,7 @@ export function BridgeCharts({ samples, decimals }: { samples: BridgeSample[]; d
   return (
     <div>
       <div className="chart-meta">
-        <span>Local development · test assets · not real backing</span>
+        <span>{NATIVE_ENVIRONMENT_LABEL} · test assets · not real backing</span>
         <strong>Observed coverage {latest.label}</strong>
       </div>
       <div className="chart-pair">

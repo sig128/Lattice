@@ -9,7 +9,9 @@ Internet ─► ufw (22/80/443) ─► nftables per-IP limits ─► Caddy :80/:
    /            ─► lattice-web       127.0.0.1:3000  (Next.js)
    /rpc  /ws    ─► lattice-gateway   127.0.0.1:8080  ─► validator 127.0.0.1:8899 / :8900
    /api/faucet, /api/rpc, /api/bridge/* ─► lattice-gateway (strict limits) ─► lattice-web
-lattice-validator  solana-test-validator, all sockets on 127.0.0.1 (faucet 9900 firewalled)
+lattice-validator  solana-test-validator; gossip/TPU on 127.0.0.1; RPC 8899, PubSub 8900 and
+                   faucet 9900 listen on 0.0.0.0 (hardcoded in v4.3.0) but are loopback-only
+                   (unit IP filter + nftables drop + ufw + security group)
 lattice-monitor    probes 127.0.0.1:8899/8900 → PostgreSQL (rpc_observations)
 lattice-recorder   bridge demo reconciliation samples
 lattice-fork-build transient unit: background build of the Lattice Agave fork
@@ -52,7 +54,9 @@ bootstrap keeps running; re-attach with
 
 Useful options (passed through to bootstrap):
 
-- `--skip-os` — skip apt, hardening, and toolchain phases (fast app-only update).
+- `--skip-os` — skip apt, hardening, and toolchain/PostgreSQL/Caddy phases
+  (fast app-only update). Only for a host that completed one full bootstrap;
+  bootstrap refuses it if node, pnpm, caddy, or psql are missing.
 - `--skip-fork-build` — don't start the background fork build.
 - `--ip-tls off` — never try an IP certificate.
 - `--dry-run` — list what would be uploaded.
@@ -185,28 +189,43 @@ instance status check.
     5 `sendTransaction`/s per IP; HTTP 429 with `Retry-After` beyond that.
   - WebSockets: ≤8 concurrent per IP, ≤512 total, 1 upgrade/s per IP
     (burst 10), client→server traffic ≤4 KiB/s (burst 64 KiB), 6 h lifetime.
-  - site faucet: 1 request per IP per 10 minutes, 30 per hour globally. The
+  - site faucet (1 SOL of unbacked test units per request): the gateway
+    allows 1 request per IP per 10 minutes and 30 per hour globally
+    (`GATEWAY_FAUCET_IP_INTERVAL_SEC`, `GATEWAY_FAUCET_GLOBAL_PER_HOUR`);
+    behind it the route itself limits per IP, per recipient address
+    (10 minutes) and 120 per hour globally (`LATTICE_SITE_FAUCET_*`), keyed
+    on the client IP the gateway passes as `X-Forwarded-For`. The
     bridge demo mutation routes return 403 unless `LATTICE_PUBLIC_BRIDGE_DEMO=1`.
 
   All limits are environment variables (`GATEWAY_*`, see the top of the
   gateway). A dedicated Caddy plugin (`github.com/mholt/caddy-ratelimit`,
   needs a custom `xcaddy` build) is not used, so Caddy stays on the signed
   apt package with automatic security updates.
-- **Validator unit:** `IPAddressDeny=any` / `IPAddressAllow=localhost`, so
-  even the faucet that binds `0.0.0.0:9900` can't be reached from outside if
-  ufw were disabled.
+- **Validator sockets:** Agave v4.3.0 `solana-test-validator` hardcodes the
+  RPC (8899), PubSub (8900) and faucet (9900) listeners to `0.0.0.0`
+  (`test-validator/src/lib.rs`); `--bind-address 127.0.0.1` only covers
+  gossip/TPU/TVU. Three independent layers keep them loopback-only: the unit's
+  `IPAddressDeny=any` / `IPAddressAllow=localhost` (verified: requests to the
+  instance's private IP get no answer), an nftables `tcp dport {8899,8900,9900}
+  drop` for non-loopback traffic in `lattice-edge-limits`, and ufw/the
+  security group.
 
 ## TLS and adding a domain
 
 **IP mode (current).** Let's Encrypt has issued IP-address certificates
 generally since 15 January 2026, only under the `shortlived` profile (about 6-day
-certificates, renewed automatically). Caddy ≥ 2.10.1 supports them over
-HTTP-01 for IPv4 (this host has Caddy from the official apt repository).
+certificates, renewed automatically). Caddy ≥ 2.10.1 supports them for IPv4
+(this host: Caddy v2.11.7 from the official apt repository; the first
+certificate was issued in ~15 s via TLS-ALPN-01 on 443, so issuance and
+renewal do not depend on port 80).
 With `LATTICE_IP_TLS=auto`, bootstrap first serves HTTP and HTTPS together,
-waits up to 150 s for the certificate, and switches to HTTPS (HTTP redirects)
-only once a verified TLS request succeeds. Otherwise it stays on plain HTTP
-and records `off` in `/var/lib/lattice/state/ip-tls`. The URLs compiled
-into the site follow that outcome. `lattice-healthcheck` alerts if the IP
+waits up to 150 s for the certificate, and switches to HTTPS only once a
+verified TLS request succeeds. Otherwise it stays on plain HTTP and records
+`off` in `/var/lib/lattice/state/ip-tls`. The URLs compiled into the site
+follow that outcome (an HTTPS page cannot call `http://` RPC). With TLS on,
+`http://<ip>/rpc` and `ws://<ip>/ws` are still served directly (same gateway
+limits; WebSocket clients do not follow redirects) and every other HTTP path
+redirects to HTTPS. `lattice-healthcheck` alerts if the IP
 certificate gets within 48 h of expiry. To stay on plain HTTP:
 `--ip-tls off`.
 
@@ -240,6 +259,13 @@ tail -f /var/log/lattice/fork-build.log
 ls /var/lib/lattice/build/src/chain/agave/target/release/
 cat /var/lib/lattice/build/src/chain/evidence/lattice-build-*/summary.txt
 ```
+
+The script's `smoke-genesis` step fails against fork commit `2987a72ad` (and
+upstream 4.3.0): `solana-genesis` now requires `--bootstrap-validator-bls-pubkey`
+(Alpenglow), which `chain/scripts/lattice-genesis.sh` does not pass yet. The
+binaries themselves build (`build-release` PASS); fix the genesis script before
+relying on the fork's `solana-genesis`. `solana-test-validator` generates its
+own genesis and is unaffected.
 
 The live service is **not switched automatically**. Switching to the fork
 changes the runtime and feature set. Do it as a guarded reset, so the fork's
@@ -277,5 +303,10 @@ instance destroys the ledger and keys unless you snapshot the volume first.
 - PubSub messages on `/ws` are proxied byte-for-byte. Connection counts and
   client byte rates are limited, but individual subscription methods are not
   filtered (Agave PubSub has no administrative methods).
-- `systemd-analyze verify` and nftables syntax were not runnable on the
-  development Mac; both are exercised on the server by bootstrap.
+- Blockstore footprint: shreds are capped by `--limit-blockstore-size`, but
+  RocksDB write-ahead logs add up to 4 GiB (Agave's `max_total_wal_size`)
+  before forced flushes free them. Expect a ledger of several GB that grows
+  for the first ~30 minutes, then levels off; the disk guard covers the rest.
+- The host reports pending kernel/library updates after the first
+  `dist-upgrade`; reboot in a quiet window (`sudo reboot`; every service is
+  enabled and the ledger resumes).

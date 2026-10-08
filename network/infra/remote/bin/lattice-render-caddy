@@ -174,8 +174,24 @@ EOF
 	import lattice_site
 }"
     else
+      # RPC clients pinned to http:// and ws:// keep working; WebSocket
+      # clients do not follow redirects.
       http_block="http://${ip} {
-	redir https://${ip}{uri} 308
+	import lattice_common
+
+	@rpc path /rpc /rpc/*
+	handle @rpc {
+		import lattice_rpc
+	}
+
+	@ws path /ws /ws/*
+	handle @ws {
+		import lattice_ws
+	}
+
+	handle {
+		redir https://${ip}{uri} 308
+	}
 }"
     fi
     cat <<EOF

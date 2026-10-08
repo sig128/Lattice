@@ -65,7 +65,7 @@ required backing: R >= L`}</Code>
         <Code>{`./chain/scripts/fetch-upstream.sh
 # Build the exact checkout following its release instructions.
 ./chain/scripts/start-local.sh --reset
-solana --url http://127.0.0.1:8899 genesis-hash`}</Code>
+solana --url localhost genesis-hash`}</Code>
         <p>Agave v4.3.0 is pinned at commit <code>825efd18292aff6ffcf9daa0f7612f21b3531a72</code>. The local faucet is unbacked test money.</p>
       </Section>
     </Page>

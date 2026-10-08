@@ -1,3 +1,4 @@
+import { INTERNAL_HTTP_RPC } from "@lattice/config";
 import { createHash } from "node:crypto";
 import { loadOrCreateKey } from "@lattice/bridge/local";
 import { readReceipts, readState, saveReceipt } from "@lattice/bridge/state";
@@ -49,7 +50,7 @@ export async function POST(request: Request) {
     if (typeof body.sourceSignature !== "string" || !/^[1-9A-HJ-NP-Za-km-z]{64,96}$/.test(body.sourceSignature)) throw new Error("Valid source signature is required");
     sourceSignature = body.sourceSignature;
     const amount = BigInt(body.amountAtomic);
-    if (amount > 1_000_000n * 10n ** 9n) throw new Error("Amount exceeds local bridge limit");
+    if (amount > 1_000_000n * 10n ** 9n) throw new Error("Amount exceeds test bridge limit");
     const owner = new PublicKey(body.owner);
     const existing = (await readReceipts()).find((item) => item.sourceSignature === sourceSignature);
     if (existing) return Response.json(existing);
@@ -57,9 +58,9 @@ export async function POST(request: Request) {
     inflight.add(sourceSignature);
 
     const state = await readState();
-    if (!state) throw new Error("Local bridge is not initialized");
-    const connection = new Connection("http://127.0.0.1:8899", "confirmed");
-    if (await connection.getGenesisHash() !== state.genesisHash) throw new Error("Local genesis mismatch");
+    if (!state) throw new Error("Test bridge is not initialized on this network");
+    const connection = new Connection(INTERNAL_HTTP_RPC, "confirmed");
+    if (await connection.getGenesisHash() !== state.genesisHash) throw new Error("Validator genesis mismatch");
     const transaction = await finalizedTransaction(connection, sourceSignature);
     if (transaction.meta?.err) throw new Error("Source transaction failed");
     const keys = transaction.transaction.message.accountKeys.map((item) => item.pubkey.toBase58());

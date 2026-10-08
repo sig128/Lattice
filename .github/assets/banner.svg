@@ -13,7 +13,7 @@
     <rect x="618" y="296" width="184" height="30" fill="#ffffff" stroke="#e3e3e3"/>
     <text x="632" y="316" fill="#202020">LAT ↔ TOKEN 1:1</text>
     <rect x="814" y="296" width="208" height="30" fill="#ffffff" stroke="#e3e3e3"/>
-    <circle cx="830" cy="311" r="4" fill="#8a5a00"/>
-    <text x="842" y="316" fill="#202020">Public testnet soon</text>
+    <circle cx="830" cy="311" r="4" fill="#176b3a"/>
+    <text x="842" y="316" fill="#202020">Public testnet live</text>
   </g>
 </svg>

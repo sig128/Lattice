@@ -8,7 +8,7 @@ export async function POST(request: Request) {
     const rpcRequest = validateRpcRequest(await request.json());
     const endpoint = publicConfig.rpc[0];
     if (!endpoint || endpoint.environment === "production") {
-      return Response.json({ error: "Local RPC is not configured" }, { status: 503 });
+      return Response.json({ error: "RPC is not configured" }, { status: 503 });
     }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3_000);

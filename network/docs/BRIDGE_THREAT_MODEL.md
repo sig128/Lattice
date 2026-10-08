@@ -62,9 +62,10 @@ pausing must react within one rate window.
 The relayer has no authority over funds. It cannot build a message that
 guardians will sign. An attester accepts only `(direction, nonce)`, reads the
 event itself from its own RPC endpoints at finalized commitment, and builds
-the canonical bytes. Payout goes only to the attested recipient: the
-recipient's token account must be the canonical ATA of the attested owner,
-on the bound mint. A malicious relayer can therefore only:
+the canonical bytes. Payout goes only to the attested recipient: Release requires
+a token account on the bound mint whose owner is the attested recipient. The
+relayer uses the recipient's associated token account and creates it if
+needed. A malicious relayer can therefore only:
 
 - **censor or delay** claims. Anyone can run a relayer, and submission is
   permissionless;
@@ -255,7 +256,7 @@ offers a post-quantum verifier.
 3. Run reconciliation continuously and page on any alarm. An operator must
    be able to pause within one rate window.
 4. Freeze the upgrade authority after the soak period.
-5. Get an external audit of every component in §0 scope, plus the Lattice
+5. Get an external audit of every in-scope component, plus the Lattice
    builtin, before any mainnet value is held.
 
 ## 5. Known gaps in verification

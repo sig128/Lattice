@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { IS_TESTNET, NATIVE_ENVIRONMENT, NATIVE_GENESIS_HASH, PUBLIC_HTTP_RPC, PUBLIC_WS_RPC } from "./network";
 
 export const evidenceStateSchema = z.enum([
   "unconfigured",
@@ -71,18 +72,8 @@ export type EvidenceState = z.infer<typeof evidenceStateSchema>;
 
 export const LOCAL_TEST_MINT = "So11111111111111111111111111111111111111112";
 export const SOLANA_MAINNET_GENESIS = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d";
-export const LOCAL_DEVELOPMENT_GENESIS = "G9818341AwzwpDqHoh3uqy2hS8AkM1d9WCYbaX6YcVRU";
-
-// "production" is deliberately not selectable through the environment.
-export const NATIVE_ENVIRONMENT = z
-  .enum(["local-development", "testnet"])
-  .parse(process.env.NEXT_PUBLIC_LATTICE_ENVIRONMENT || "local-development");
-const isTestnet = NATIVE_ENVIRONMENT === "testnet";
-export const NATIVE_GENESIS_HASH: string | null = isTestnet
-  ? process.env.NEXT_PUBLIC_NATIVE_GENESIS_HASH || null
-  : LOCAL_DEVELOPMENT_GENESIS;
-// Server-side address of the validator on the same host; never sent to browsers.
-export const INTERNAL_HTTP_RPC = process.env.LATTICE_INTERNAL_HTTP_RPC || "http://127.0.0.1:8899";
+export * from "./network";
+const isTestnet = IS_TESTNET;
 
 export const defaultConfig: DeploymentConfig = deploymentConfigSchema.parse({
   schemaVersion: 1,
@@ -114,14 +105,14 @@ export const defaultConfig: DeploymentConfig = deploymentConfigSchema.parse({
   },
   destination: {
     genesisHash: NATIVE_GENESIS_HASH,
-    bridgeDeploymentId: "lattice-local-bridge-v1",
+    bridgeDeploymentId: isTestnet ? "lattice-testnet-bridge-v1" : "lattice-local-bridge-v1",
   },
   rpc: [
     {
       label: isTestnet ? "Lattice public testnet" : "Local validator",
       environment: NATIVE_ENVIRONMENT,
-      httpUrl: process.env.NEXT_PUBLIC_NATIVE_HTTP_RPC ?? "http://127.0.0.1:8899",
-      websocketUrl: process.env.NEXT_PUBLIC_NATIVE_WS_RPC ?? "ws://127.0.0.1:8900",
+      httpUrl: PUBLIC_HTTP_RPC,
+      websocketUrl: PUBLIC_WS_RPC,
       expectedGenesisHash: NATIVE_GENESIS_HASH,
       capabilities: isTestnet
         ? ["getGenesisHash", "getHealth", "getSlot", "getVersion", "getLatestBlockhash", "sendTransaction"]

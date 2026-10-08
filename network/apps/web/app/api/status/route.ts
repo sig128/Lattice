@@ -1,4 +1,4 @@
-import { publicConfig } from "@lattice/config";
+import { INTERNAL_HTTP_RPC, INTERNAL_WS_RPC, publicConfig } from "@lattice/config";
 import { probeEndpoint } from "@lattice/monitor/probe";
 
 export const dynamic = "force-dynamic";
@@ -6,9 +6,10 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   const endpoints = await Promise.all(publicConfig.rpc.map(async (endpoint) => ({
     ...endpoint,
+    // Same-host validator; the public URL is displayed, not dialled back through the edge.
     observation: await probeEndpoint(
-      endpoint.httpUrl,
-      endpoint.websocketUrl,
+      INTERNAL_HTTP_RPC,
+      INTERNAL_WS_RPC,
       endpoint.expectedGenesisHash,
       2_500,
     ),

@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./network": "./src/network.ts",
     "./token-validator": "./src/token-validator.ts"
   },
   "scripts": {
